@@ -1106,9 +1106,16 @@ export function calculateDeflection(
   };
   const K_coeff = deflCoeff[endCondition];
 
-  // Immediate deflection: K × w × L⁴ / (Ec × Ie)
-  const wN = wService; // kN/m = N/mm
-  const deltaImmediate = (K_coeff * wN * Math.pow(L, 4)) / (Ec * Ie); // mm
+  // ========== ACI 318-19 §24.2.3: Immediate deflections ==========
+  // Split into dead and live components separately to avoid double-counting in long-term calc.
+  // ACI correct approach:
+  //   δ_immediate_dead = K × wD × L⁴ / (Ec × Ie)
+  //   δ_immediate_live = K × wL × L⁴ / (Ec × Ie)
+  //   δ_long_term      = λΔ × δ_sustained_immediate   (sustained dead only)
+  //   δ_total          = δ_immediate_dead + δ_immediate_live + δ_long_term
+  const deltaImmediateDead = (K_coeff * deadLoad  * Math.pow(L, 4)) / (Ec * Ie);
+  const deltaImmediateLive = (K_coeff * liveLoad  * Math.pow(L, 4)) / (Ec * Ie);
+  const deltaImmediate = deltaImmediateDead + deltaImmediateLive;
 
   // ========== ACI 318-19 §24.2.4: Long-term deflection ==========
   // λΔ = ξ / (1 + 50ρ')  where ρ' = As'/(b*d)
@@ -1127,13 +1134,12 @@ export function calculateDeflection(
   const rhoPrime = AsPrime > 0 ? AsPrime / (b * d) : 0;
   const lambdaDelta = xi / (1 + 50 * rhoPrime);
 
-  // Sustained load deflection (dead load portion)
+  // Long-term: applied only to SUSTAINED dead load component — NOT to live or total immediate
   const wSustained = deadLoad * sustainedLoadFraction;
   const deltaSustainedImmediate = (K_coeff * wSustained * Math.pow(L, 4)) / (Ec * Ie);
   const deltaLongTerm = lambdaDelta * deltaSustainedImmediate;
 
-  // Total deflection = immediate (live) + immediate (dead) + long-term (sustained dead)
-  // Per ETABS: Δ_total = Δ_immediate + λΔ × Δ_sustained_immediate
+  // Total = immediate (DL + LL) + long-term (sustained DL only) — no double-counting
   const deltaTotal = deltaImmediate + deltaLongTerm;
 
   // Allowable deflection (ACI 318-19 Table 24.2.2)
