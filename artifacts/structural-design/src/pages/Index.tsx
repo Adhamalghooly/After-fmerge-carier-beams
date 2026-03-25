@@ -1658,7 +1658,34 @@ const Index = () => {
                 />
 
                 <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-sm">الأحمال على الجسور (kN/m)</CardTitle></CardHeader>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm">الأحمال على الجسور (kN/m)</CardTitle>
+                    {/* Beam-on-beam diagnostic banner */}
+                    {bobConnections.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5 mt-1.5">
+                        {bobConnections.map((c, i) => (
+                          <span key={i} className="inline-flex items-center gap-1 text-[10px] bg-blue-500/10 border border-blue-500/30 text-blue-700 dark:text-blue-300 rounded px-2 py-0.5 font-mono">
+                            <span className="font-bold">{c.primaryBeamId}</span>
+                            <span className="opacity-60">←</span>
+                            <span>{c.secondaryBeamIds.join('+')}</span>
+                            {c.reactionForce > 0 && <span className="text-amber-600 font-bold ml-1">{c.reactionForce.toFixed(1)} kN</span>}
+                          </span>
+                        ))}
+                      </div>
+                    ) : detectedConnections.length > 0 ? (
+                      <p className="text-[11px] text-muted-foreground mt-1">
+                        🔄 تم اكتشاف {detectedConnections.length} اتصال جسر-على-جسر، تشغيل التحليل لحساب الأحمال...
+                      </p>
+                    ) : removedColumnIds.length === 0 ? (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                        ⚠️ لا توجد اتصالات جسر-على-جسر — لاكتشافها يجب حذف عمود عند نقطة تقاطع جسرين متعاكسين
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground mt-1">
+                        ℹ️ {removedColumnIds.length} عمود محذوف — لم يُكتشف أي تقاطع جسرين متعاكسين عنده
+                      </p>
+                    )}
+                  </CardHeader>
                   <CardContent className="overflow-x-auto">
                     <Table>
                       <TableHeader><TableRow>
