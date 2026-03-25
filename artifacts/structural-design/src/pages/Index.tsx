@@ -1850,8 +1850,11 @@ const Index = () => {
                   frames={frames}
                   beams={beamsWithLoads}
                   columns={columns}
-                  mat={mat}
                   stories={stories}
+                  frameResults3D={frameResults}
+                  frameResults2D={frameResults2D}
+                  colLoads3D={colLoads3D}
+                  colLoads2D={colLoadsBiaxial}
                 />
               </div>
             )}
