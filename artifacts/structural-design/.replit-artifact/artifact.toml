@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Structural Design Suite"
+version = "1.0.0"
+id = "artifacts/structural-design"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20592
+
+[services.development]
+run = "pnpm --filter @workspace/structural-design run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/structural-design", "run", "build" ]
+publicDir = "artifacts/structural-design/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20592"
+BASE_PATH = "/"

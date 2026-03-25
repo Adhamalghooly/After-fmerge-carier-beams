@@ -1,0 +1,2217 @@
+import React, { useReducer, useMemo, useCallback, useEffect } from "react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import {
+  Slab, Column, Beam, Frame, MatProps, SlabProps, FrameResult,
+  generateColumns, generateBeams, generateFrames,
+  calculateBeamLoads, analyzeFrame, designFlexure, designShear,
+  designColumnETABS, designSlab, calculateColumnLoads, FlexureResult, ShearResult,
+  detectBeamOnBeam, analyzeWithBeamOnBeam, BeamOnBeamConnection, ColumnResult,
+  calculateDeflection, DeflectionResult, diagnoseBeam, BeamDiagnostic,
+  calculateColumnLoadsBiaxial, designColumnBiaxial, BiaxialColumnResult,
+  calculateFrameBentUp, FrameBentUpResult, Story,
+  getJointConnectivityInfo, JointConnectivityInfo,
+} from "@/lib/structuralEngine";
+import { getColumnLoads3D, getFrameResults3D } from "@/lib/analyze3DColumns";
+import { ModelManager } from "@/structural/model/modelManager";
+import { generateStructureFromSlabs } from "@/structural/generators/slabStructureGenerator";
+import ToolPalette, { ToolType } from "@/components/ToolPalette";
+import ModelCanvas from "@/components/ModelCanvas";
+import PropertyPanel from "@/components/PropertyPanel";
+import BuildingView from "@/components/BuildingView";
+import RebarDetailModal from "@/components/RebarDetailModal";
+import ElementPropertiesDialog from "@/components/ElementPropertiesDialog";
+import AnalysisDiagramDialog from "@/components/AnalysisDiagramDialog";
+import {
+  Building2, Layers, Calculator, BarChart3, Ruler, Eye,
+  Grid3X3, Settings2, Download, Bot, Building, Zap, Plus, Trash2,
+  Undo2, Save, Check, RotateCcw, Wand2, Search, Compass
+} from "lucide-react";
+import AppHeader from "@/components/AppHeader";
+import BottomNav, { type MainTab } from "@/components/BottomNav";
+import AIAssistantPanel from "@/ai/structuralAssistant/AIAssistantPanel";
+import MultiStoryDesigner from "@/building/MultiStoryDesigner";
+import GenerativeDesignDashboard from "@/generative/GenerativeDesignDashboard";
+import type { EvaluatedOption } from "@/generative/types";
+import AutoDesignPanel from "@/components/AutoDesignPanel";
+import type { AutoDesignResult } from "@/lib/autoDesigner";
+import { generateStructuralDXF, generateReinforcementDXF, generateBeamLayoutDXF, generateColumnLayoutDXF, downloadDXF } from "@/export/dxfExporter";
+import { generateStructuralReport } from "@/export/pdfReport";
+import { exportStructuralDrawingPDF } from "@/export/drawingExporter";
+import { generateAutoDrawings } from "@/drawings/autoDrawingGenerator";
+import { generateConstructionSheets } from "@/drawings/constructionSheets";
+import { generateBBS, exportBBSToPDF, exportBBSToExcel } from "@/rebar/bbsGenerator";
+import BeamRebarDetailView from "@/components/BeamRebarDetailView";
+import { appReducer, initialState, type AppAction } from "./indexReducer";
+import { StorySelector, StoryManager } from "@/components/StorySelector";
+import BeamDesignDetails from "@/components/BeamDesignDetails";
+import ColumnDesignDetails from "@/components/ColumnDesignDetails";
+import PMDiagramChart from "@/components/PMDiagramChart";
+import ExportPanel from "@/components/ExportPanel";
+import ETABSComparisonTable from "@/components/ETABSComparisonTable";
+import ProjectManager from "@/components/ProjectManager";
+import LevelPlanView from "@/components/LevelPlanView";
+
+const ParamInput = ({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) => (
+  <div className="space-y-1">
+    <label className="property-label">{label}</label>
+    <Input type="number" value={value}
+      onChange={(e) => { onChange(parseFloat(e.target.value) || 0); }}
+      className="font-mono h-10 text-sm" />
+  </div>
+);
+
+type ReleaseDOF = 'ux' | 'uy' | 'uz' | 'rx' | 'ry' | 'rz';
+type BeamEndReleaseState = Record<'nodeI' | 'nodeJ', Record<ReleaseDOF, boolean>>;
+
+const EMPTY_BEAM_END_RELEASES: BeamEndReleaseState = {
+  nodeI: { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false },
+  nodeJ: { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false },
+};
+
+const RELEASE_DOF_META: { key: ReleaseDOF; etabs: string; desc: string }[] = [
+  { key: 'ux', etabs: 'U1', desc: 'تحرير محوري' },
+  { key: 'uy', etabs: 'U2', desc: 'تحرير قص محلي' },
+  { key: 'uz', etabs: 'U3', desc: 'تحرير قص عمودي' },
+  { key: 'rx', etabs: 'R1', desc: 'تحرير لَي' },
+  { key: 'ry', etabs: 'R2', desc: 'تحرير عزم حول Y' },
+  { key: 'rz', etabs: 'R3', desc: 'تحرير عزم حول Z' },
+];
+
+const createEmptyBeamEndReleases = (): BeamEndReleaseState => ({
+  nodeI: { ...EMPTY_BEAM_END_RELEASES.nodeI },
+  nodeJ: { ...EMPTY_BEAM_END_RELEASES.nodeJ },
+});
+
+const modelManager = new ModelManager();
+
+const Index = () => {
+  const [state, dispatch] = useReducer<React.Reducer<typeof initialState, AppAction>>(appReducer, initialState);
+  const {
+    stories, selectedStoryId,
+    slabs, mat, slabProps, beamB, beamH, colB, colH, colL, colLBelow, colTopEndCondition, colBottomEndCondition,
+    analyzed, frameResults, bobConnections,
+    activeTab, mode, activeTool, pendingNode,
+    selectedNodeId, selectedFrameId, selectedAreaId,
+    removedColumnIds, removedBeamIds, beamOverrides, colOverrides, slabPropsOverrides, extraBeams, extraColumns, supportRestraints, frameEndReleases,
+    modalOpen, selectedElement, elemPropsOpen, elemPropsFrameId, elemPropsAreaId,
+    diagramOpen, diagramData, savedMessage,
+  } = state;
+
+  // Main bottom navigation tab
+  const [mainTab, setMainTab] = React.useState<MainTab>('inputs');
+  const [releaseEditorBeamId, setReleaseEditorBeamId] = React.useState<string | null>(null);
+  const [releaseEditorData, setReleaseEditorData] = React.useState<BeamEndReleaseState>(createEmptyBeamEndReleases);
+
+  // Modeler elevation filter state
+  const [modelerElevation, setModelerElevation] = React.useState<number>(0);
+
+  // Available elevations from stories
+  const availableElevations = useMemo(() => {
+    const elevs = new Set<number>();
+    elevs.add(0); // ground level
+    for (const s of stories) {
+      elevs.add(s.elevation ?? 0);
+      elevs.add((s.elevation ?? 0) + s.height);
+    }
+    return [...elevs].sort((a, b) => a - b);
+  }, [stories]);
+
+  // Helper: filter slabs by selected story
+  const isAllStories = selectedStoryId === '__ALL__';
+  const storyFilteredSlabs = useMemo(() =>
+    isAllStories ? slabs : slabs.filter(s => s.storyId === selectedStoryId),
+    [slabs, selectedStoryId, isAllStories]
+  );
+  
+  // Get story label for an element
+  const getStoryLabel = useCallback((storyId?: string) => {
+    if (!storyId) return stories[0]?.label || 'الدور 1';
+    return stories.find(s => s.id === storyId)?.label || storyId;
+  }, [stories]);
+
+  // Handler for changing individual column support conditions
+  // Legacy support change callback (kept for prop compatibility)
+  const handleColumnSupportChange = useCallback((_colId: string, _endType: 'top' | 'bottom', _value: 'F' | 'P') => {
+    // No-op: replaced by per-DOF support restraints
+  }, []);
+
+  // Per-DOF support restraints change
+  const handleSupportRestraintsChange = useCallback((posKeys: string[], restraints: { ux: boolean; uy: boolean; uz: boolean; rx: boolean; ry: boolean; rz: boolean }) => {
+    for (const key of posKeys) {
+      dispatch({ type: 'SET_SUPPORT_RESTRAINTS', posKey: key, restraints });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (savedMessage) {
+      const t = setTimeout(() => dispatch({ type: 'CLEAR_SAVED_MESSAGE' }), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [savedMessage]);
+
+  // Keyboard shortcut: Ctrl+Z for undo
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        dispatch({ type: 'UNDO' });
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  useEffect(() => {
+    if (mode === 'auto') {
+      modelManager.clear();
+      const beamSection = modelManager.createSection('B-default', beamB, beamH, 'beam');
+      const colSection = modelManager.createSection('C-default', colB, colH, 'column');
+      generateStructureFromSlabs(
+        modelManager,
+        slabs.map(s => ({ id: s.id, x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 })),
+        beamSection, colSection, slabProps.thickness, colL / 1000
+      );
+      // Reapply persisted frame end releases to modelManager nodes
+      if (frameEndReleases) {
+        for (const frame of modelManager.getAllFrames()) {
+          const ni = modelManager.getNode(frame.nodeI);
+          const nj = modelManager.getNode(frame.nodeJ);
+          if (ni && nj) {
+            const posKey = `${ni.x.toFixed(3)}_${ni.y.toFixed(3)}_${nj.x.toFixed(3)}_${nj.y.toFixed(3)}`;
+            const posKeyRev = `${nj.x.toFixed(3)}_${nj.y.toFixed(3)}_${ni.x.toFixed(3)}_${ni.y.toFixed(3)}`;
+            const rel = frameEndReleases[posKey] || frameEndReleases[posKeyRev];
+            if (rel) {
+              const isRev = !!frameEndReleases[posKeyRev] && !frameEndReleases[posKey];
+              modelManager.setNodeRestraints(frame.nodeI, isRev ? rel.nodeJ : rel.nodeI);
+              modelManager.setNodeRestraints(frame.nodeJ, isRev ? rel.nodeI : rel.nodeJ);
+            }
+          }
+        }
+      }
+      dispatch({ type: 'INC_MODEL_VERSION' });
+    }
+  }, [slabs, beamB, beamH, colB, colH, colL, slabProps.thickness, mode, frameEndReleases]);
+
+  const columns = useMemo(() => {
+    // Get unique column positions from slabs (ignoring storyId for position extraction)
+    const uniqueSlabs = slabs.filter((s, i, arr) => {
+      // Use first occurrence of each slab position pattern per story
+      return true; // keep all slabs, generateColumns deduplicates by position
+    });
+    const baseCols = generateColumns(uniqueSlabs);
+    
+    // Create a column instance for EACH story with sequential naming from bottom up
+    const allCols: Column[] = [];
+    // Sort stories by elevation (bottom to top) for sequential naming
+    const sortedStories = [...stories].sort((a, b) => (a.elevation ?? 0) - (b.elevation ?? 0));
+    let colSeq = 1;
+    for (const story of sortedStories) {
+      const storyElev = story.elevation ?? 0; // mm
+      const storyHeight = story.height ?? colL;
+      for (const c of baseCols) {
+        const colId = `C${colSeq}`;
+        const legacyId = stories.length > 1 ? `${c.id}_${story.id}` : c.id;
+        const ov = colOverrides[c.id] || colOverrides[legacyId] || colOverrides[colId];
+        const colHeight = ov?.L ?? storyHeight;
+        // Derive bottom end condition from per-support DOF restraints
+        const supportKey = `${c.x.toFixed(2)}_${c.y.toFixed(2)}_${storyElev}`;
+        const sr = supportRestraints?.[supportKey];
+        const bottomEnd: 'F' | 'P' = sr
+          ? ((sr.ux && sr.uy && sr.uz && sr.rx && sr.ry && sr.rz) ? 'F' : 'P')
+          : colBottomEndCondition as 'F' | 'P';
+        allCols.push({
+          ...c,
+          id: colId,
+          storyId: story.id,
+          b: ov?.b ?? colB,
+          h: ov?.h ?? colH,
+          L: colHeight,
+          LBelow: colLBelow,
+          zBottom: storyElev,
+          zTop: storyElev + colHeight,
+          isRemoved: removedColumnIds.includes(c.id) || removedColumnIds.includes(colId) || removedColumnIds.includes(legacyId),
+          topEndCondition: colTopEndCondition as 'F' | 'P',
+          bottomEndCondition: bottomEnd,
+        });
+        colSeq++;
+      }
+    }
+    // Add extra columns
+    for (const c of extraColumns) {
+      allCols.push({
+        ...c,
+        zBottom: c.zBottom ?? 0,
+        zTop: c.zTop ?? (c.L || 0),
+      });
+    }
+    return allCols;
+  }, [slabs, colB, colH, colL, colLBelow, removedColumnIds, colOverrides, extraColumns, colTopEndCondition, colBottomEndCondition, stories, selectedStoryId, supportRestraints]);
+
+  const beams = useMemo(() => {
+    // Deduplicate slabs by position to generate base beam topology (avoid multi-story duplication)
+    const uniqueSlabsByPos = new Map<string, Slab>();
+    for (const s of slabs) {
+      const key = `${s.x1},${s.y1}-${s.x2},${s.y2}`;
+      if (!uniqueSlabsByPos.has(key)) uniqueSlabsByPos.set(key, s);
+    }
+    const deduplicatedSlabs = [...uniqueSlabsByPos.values()];
+    const baseCols = generateColumns(deduplicatedSlabs);
+    const baseBeams = generateBeams(deduplicatedSlabs, baseCols);
+    
+    // Build a map from deduplicated slab ID -> story-specific slab IDs
+    const slabsByStory = new Map<string, Slab[]>(); // storyId -> slabs
+    for (const s of slabs) {
+      const storyId = s.storyId || stories[0]?.id || '';
+      if (!slabsByStory.has(storyId)) slabsByStory.set(storyId, []);
+      slabsByStory.get(storyId)!.push(s);
+    }
+    
+    // Create beam instances for each story with sequential naming from bottom up
+    const allBeams: Beam[] = [];
+    const sortedStoriesForBeams = [...stories].sort((a, b) => (a.elevation ?? 0) - (b.elevation ?? 0));
+    let beamSeq = 1;
+    // Build a map from (baseColId, storyId) -> sequential colId for proper references
+    const colIdMap = new Map<string, string>();
+    let colMapSeq = 1;
+    for (const story of sortedStoriesForBeams) {
+      for (const c of baseCols) {
+        colIdMap.set(`${c.id}_${story.id}`, `C${colMapSeq}`);
+        colMapSeq++;
+      }
+    }
+    for (const story of sortedStoriesForBeams) {
+      const storyElev = story.elevation ?? 0;
+      const storyHeight = story.height ?? colL;
+      const beamZ = storyElev + storyHeight; // Beam at top of story (slab level)
+      
+      // Get slabs for this story to properly reference them
+      const storySlabs = slabsByStory.get(story.id) || [];
+      
+      for (const b of baseBeams) {
+        const beamId = `B${beamSeq}`;
+        const fromColId = colIdMap.get(`${b.fromCol}_${story.id}`) ?? b.fromCol;
+        const toColId = colIdMap.get(`${b.toCol}_${story.id}`) ?? b.toCol;
+        const legacyBeamId = stories.length > 1 ? `${b.id}_${story.id}` : b.id;
+        const ov = beamOverrides[b.id] || beamOverrides[legacyBeamId] || beamOverrides[beamId];
+        
+        // Map base beam slab references to this story's slab IDs (match by position)
+        const storySlabIds: string[] = [];
+        for (const basSlabId of b.slabs) {
+          const baseSlab = deduplicatedSlabs.find(s => s.id === basSlabId);
+          if (!baseSlab) continue;
+          const matchingSlab = storySlabs.find(s =>
+            s.x1 === baseSlab.x1 && s.y1 === baseSlab.y1 &&
+            s.x2 === baseSlab.x2 && s.y2 === baseSlab.y2
+          );
+          if (matchingSlab) storySlabIds.push(matchingSlab.id);
+        }
+        
+        allBeams.push({
+          ...b,
+          id: beamId,
+          fromCol: fromColId,
+          toCol: toColId,
+          storyId: story.id,
+          b: ov?.b ?? beamB,
+          h: ov?.h ?? beamH,
+          z: beamZ,
+          slabs: storySlabIds.length > 0 ? storySlabIds : b.slabs,
+        });
+        beamSeq++;
+      }
+    }
+    // Add extra beams
+    for (const eb of extraBeams) {
+      allBeams.push({ ...eb, z: eb.z ?? 0 });
+    }
+    return allBeams;
+  }, [slabs, columns, beamB, beamH, beamOverrides, extraBeams, stories, selectedStoryId, colL]);
+
+  const beamsWithLoads = useMemo(() => {
+    return beams
+      .filter(b => !removedBeamIds.includes(b.id))
+      .map(b => {
+        const loads = calculateBeamLoads(b, slabs, slabProps, mat);
+        const wallLoad = beamOverrides[b.id]?.wallLoad || b.wallLoad || 0;
+        return { ...b, deadLoad: loads.deadLoad + wallLoad, liveLoad: loads.liveLoad, wallLoad };
+      });
+  }, [beams, slabs, slabProps, mat, beamOverrides, removedBeamIds]);
+
+  const frames = useMemo(() => generateFrames(beamsWithLoads), [beamsWithLoads]);
+
+  const detectedConnections = useMemo(() => {
+    if (removedColumnIds.length === 0) return [];
+    return detectBeamOnBeam(beamsWithLoads, columns, removedColumnIds);
+  }, [beamsWithLoads, columns, removedColumnIds]);
+
+  const runAnalysis = () => {
+    const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
+    if (removedColumnIds.length > 0 && detectedConnections.length > 0) {
+      // Auto-set moment releases for secondary (carried) beams at the connection point
+      // This makes the hinge visible in the modeling tab
+      for (const conn of detectedConnections) {
+        for (const secBeamId of conn.secondaryBeamIds) {
+          const beam = beamsWithLoads.find(b => b.id === secBeamId);
+          if (!beam) continue;
+          const isAtStart = beam.fromCol === conn.removedColumnId;
+          const posKey = getBeamReleaseKey(beam);
+          // Set rz (moment about Z) release at the end connecting to the carrier beam
+          const nodeIRelease = isAtStart
+            ? { ux: false, uy: false, uz: false, rx: false, ry: false, rz: true }
+            : { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false };
+          const nodeJRelease = !isAtStart
+            ? { ux: false, uy: false, uz: false, rx: false, ry: false, rz: true }
+            : { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false };
+          dispatch({
+            type: 'SET_FRAME_END_RELEASES',
+            posKey,
+            nodeIRestraints: nodeIRelease,
+            nodeJRestraints: nodeJRelease,
+          });
+        }
+      }
+
+      const result = analyzeWithBeamOnBeam(frames, bMap, columns, mat, removedColumnIds, detectedConnections);
+      dispatch({ type: 'SET_FRAME_RESULTS', results: result.frameResults });
+      dispatch({ type: 'SET_BOB_CONNECTIONS', connections: result.connections });
+      if (!result.converged) {
+        console.warn(`Beam-on-Beam: لم يتقارب التحليل بعد ${result.iterations} تكرارات`);
+      }
+    } else {
+      try {
+        const results3D = getFrameResults3D(frames, beamsWithLoads, columns, mat, frameEndReleases, detectedConnections);
+        dispatch({ type: 'SET_FRAME_RESULTS', results: results3D });
+      } catch (err) {
+        console.warn('3D frame analysis failed, falling back to 2D:', err);
+        const results2D = frames.map(f => analyzeFrame(f, bMap, columns, mat));
+        dispatch({ type: 'SET_FRAME_RESULTS', results: results2D });
+      }
+      dispatch({ type: 'SET_BOB_CONNECTIONS', connections: [] });
+    }
+    dispatch({ type: 'SET_ANALYZED', value: true });
+  };
+
+  const getBeamReleaseKey = useCallback((beam: Beam) => (
+    `${beam.x1.toFixed(3)}_${beam.y1.toFixed(3)}_${beam.x2.toFixed(3)}_${beam.y2.toFixed(3)}`
+  ), []);
+
+  const getBeamReleaseState = useCallback((beam: Beam): BeamEndReleaseState => {
+    const posKey = getBeamReleaseKey(beam);
+    const posKeyRev = `${beam.x2.toFixed(3)}_${beam.y2.toFixed(3)}_${beam.x1.toFixed(3)}_${beam.y1.toFixed(3)}`;
+    const rel = frameEndReleases[posKey] || frameEndReleases[posKeyRev];
+
+    if (!rel) return createEmptyBeamEndReleases();
+
+    const isReversed = !!frameEndReleases[posKeyRev] && !frameEndReleases[posKey];
+    return isReversed
+      ? { nodeI: { ...rel.nodeJ }, nodeJ: { ...rel.nodeI } }
+      : { nodeI: { ...rel.nodeI }, nodeJ: { ...rel.nodeJ } };
+  }, [frameEndReleases, getBeamReleaseKey]);
+
+  const openBeamReleaseEditor = useCallback((beam: Beam) => {
+    setReleaseEditorBeamId(beam.id);
+    setReleaseEditorData(getBeamReleaseState(beam));
+  }, [getBeamReleaseState]);
+
+  const handleReleaseEditorToggle = useCallback((end: 'nodeI' | 'nodeJ', dof: ReleaseDOF, checked: boolean) => {
+    setReleaseEditorData(prev => ({
+      ...prev,
+      [end]: { ...prev[end], [dof]: checked },
+    }));
+  }, []);
+
+  const resetReleaseEditorEnd = useCallback((end: 'nodeI' | 'nodeJ') => {
+    setReleaseEditorData(prev => ({
+      ...prev,
+      [end]: { ...EMPTY_BEAM_END_RELEASES[end] },
+    }));
+  }, []);
+
+  const saveBeamReleaseEditor = useCallback(() => {
+    if (!releaseEditorBeamId) return;
+    const beam = beams.find(item => item.id === releaseEditorBeamId);
+    if (!beam) return;
+
+    dispatch({
+      type: 'SET_FRAME_END_RELEASES',
+      posKey: getBeamReleaseKey(beam),
+      nodeIRestraints: releaseEditorData.nodeI,
+      nodeJRestraints: releaseEditorData.nodeJ,
+    });
+    dispatch({ type: 'RESET_ANALYSIS' });
+    setReleaseEditorBeamId(null);
+  }, [releaseEditorBeamId, beams, releaseEditorData, getBeamReleaseKey]);
+
+  const releaseEditorBeam = useMemo(
+    () => beams.find(beam => beam.id === releaseEditorBeamId) || null,
+    [beams, releaseEditorBeamId]
+  );
+
+  const releaseEditorWarnings = useMemo(() => {
+    const warnings: string[] = [];
+    if (releaseEditorData.nodeI.ux && releaseEditorData.nodeJ.ux) warnings.push('لا يمكن تحرير U1 من الطرفين معاً لأنه يسبب عدم استقرار.');
+    if (releaseEditorData.nodeI.uy && releaseEditorData.nodeJ.uy) warnings.push('لا يمكن تحرير U2 من الطرفين معاً لأنه يسبب عدم استقرار.');
+    if (releaseEditorData.nodeI.uz && releaseEditorData.nodeJ.uz) warnings.push('لا يمكن تحرير U3 من الطرفين معاً لأنه يسبب عدم استقرار.');
+    if (releaseEditorData.nodeI.rx && releaseEditorData.nodeJ.rx) warnings.push('لا يمكن تحرير R1 من الطرفين معاً لأنه يسبب عدم استقرار.');
+    if (releaseEditorData.nodeI.ry && releaseEditorData.nodeJ.ry && (releaseEditorData.nodeI.uz || releaseEditorData.nodeJ.uz)) warnings.push('تحرير R2 من الطرفين مع U3 قد يجعل الجسر غير مستقر.');
+    if (releaseEditorData.nodeI.rz && releaseEditorData.nodeJ.rz && (releaseEditorData.nodeI.uy || releaseEditorData.nodeJ.uy)) warnings.push('تحرير R3 من الطرفين مع U2 قد يجعل الجسر غير مستقر.');
+    return warnings;
+  }, [releaseEditorData]);
+
+  const beamDesigns = useMemo(() => {
+    if (!analyzed) return [];
+    const designs: {
+      beamId: string; frameId: string; span: number;
+      Mleft: number; Mmid: number; Mright: number; Vu: number;
+      Rleft: number; Rright: number;
+      flexLeft: FlexureResult; flexMid: FlexureResult; flexRight: FlexureResult;
+      shear: ShearResult;
+      deflection: DeflectionResult;
+    }[] = [];
+    for (const fr of frameResults) {
+      const numBeams = fr.beams.length;
+      for (let bi = 0; bi < numBeams; bi++) {
+        const br = fr.beams[bi];
+        const beam = beamsWithLoads.find(b => b.id === br.beamId);
+        if (!beam) continue;
+
+        // T-beam effective flange width for positive moment (ACI 318-19 §6.3.2.1)
+        // Beam is monolithic with slab → T-section at midspan
+        const hasSlabs = beam.slabs.length > 0;
+        let effectiveFlangeWidth = 0;
+        if (hasSlabs) {
+          // Get adjacent slab widths to determine center-to-center spacing
+          const adjacentSlabWidths: number[] = [];
+          for (const slabId of beam.slabs) {
+            const slab = slabs.find(s => s.id === slabId);
+            if (!slab) continue;
+            if (beam.direction === 'horizontal') {
+              adjacentSlabWidths.push(Math.abs(slab.y2 - slab.y1));
+            } else {
+              adjacentSlabWidths.push(Math.abs(slab.x2 - slab.x1));
+            }
+          }
+          const ccSpacing = adjacentSlabWidths.reduce((a, b) => a + b, 0);
+          // ACI 318-19 §6.3.2.1: be = min(L/4, bw + 16*hf, c-c spacing)
+          const spanM = br.span; // meters
+          effectiveFlangeWidth = Math.min(
+            spanM * 1000 / 4,           // L/4
+            beam.b + 16 * slabProps.thickness,  // bw + 16*hf
+            ccSpacing * 1000            // center-to-center spacing (m to mm)
+          );
+        }
+
+        const flexLeft = designFlexure(Math.abs(br.Mleft), beam.b, beam.h, mat.fc, mat.fy);
+        // Midspan: T-beam for positive moment (slab in compression)
+        const flexMid = designFlexure(br.Mmid, beam.b, beam.h, mat.fc, mat.fy, 40,
+          hasSlabs, slabProps.thickness, effectiveFlangeWidth, 4);
+        const flexRight = designFlexure(Math.abs(br.Mright), beam.b, beam.h, mat.fc, mat.fy);
+        // Factored UDL for critical-section shear reduction per ACI 318-19 §9.4.3.2
+        const wuBeam = 1.2 * beam.deadLoad + 1.6 * beam.liveLoad;
+        // Pass actual As from flexure design for accurate ρw in Vc (ETABS-matched)
+        const AsForShear = Math.max(flexLeft.As, flexMid.As, flexRight.As);
+        const shear = designShear(br.Vu, beam.b, beam.h, mat.fc, mat.fyt, 40, mat.stirrupDia || 10, wuBeam, 300, AsForShear);
+        // Determine end condition for deflection calculation
+        const isExteriorLeft = bi === 0;
+        const isExteriorRight = bi === numBeams - 1;
+        const endCondition: 'simple' | 'one-end' | 'both-ends' = 
+          (isExteriorLeft && isExteriorRight) ? 'simple' :
+          (isExteriorLeft || isExteriorRight) ? 'one-end' : 'both-ends';
+        // Long-term deflection: pass compression steel As' and sustained load fraction
+        const AsPrimeForDefl = flexMid.As * 0.3; // typical top steel at midspan ≈ 30% of bottom
+        const deflection = calculateDeflection(br.span, beam.b, beam.h, mat.fc, beam.deadLoad, beam.liveLoad, flexMid.As, endCondition, 'B', AsPrimeForDefl, 1.0, 60);
+        designs.push({
+          beamId: br.beamId, frameId: fr.frameId, span: br.span,
+          Mleft: br.Mleft, Mmid: br.Mmid, Mright: br.Mright, Vu: br.Vu,
+          Rleft: br.Rleft || 0, Rright: br.Rright || 0,
+          flexLeft, flexMid, flexRight, shear, deflection,
+        });
+      }
+    }
+    return designs;
+  }, [frameResults, beamsWithLoads, mat, analyzed]);
+
+  // Beam diagnostics - detailed ACI 318-19 compliance check
+  const beamDiagnostics = useMemo<Map<string, BeamDiagnostic>>(() => {
+    const map = new Map<string, BeamDiagnostic>();
+    for (const d of beamDesigns) {
+      const beam = beamsWithLoads.find(b => b.id === d.beamId);
+      if (!beam) continue;
+      // ACI 318-19: each section designed independently; Mu_max for reporting only
+      const Mu_max = Math.max(Math.abs(d.Mleft), Math.abs(d.Mmid), Math.abs(d.Mright));
+
+      // Calculate effective flange width for T-beam diagnosis
+      let effFlangeW = 0;
+      if (beam.slabs.length > 0) {
+        const adjacentWidths: number[] = [];
+        for (const slabId of beam.slabs) {
+          const slab = slabs.find(s => s.id === slabId);
+          if (!slab) continue;
+          if (beam.direction === 'horizontal') {
+            adjacentWidths.push(Math.abs(slab.y2 - slab.y1));
+          } else {
+            adjacentWidths.push(Math.abs(slab.x2 - slab.x1));
+          }
+        }
+        const ccSpacing = adjacentWidths.reduce((a, b) => a + b, 0);
+        effFlangeW = Math.min(d.span * 1000 / 4, beam.b + 16 * slabProps.thickness, ccSpacing * 1000);
+      }
+
+      const diag = diagnoseBeam(
+        d.beamId,
+        { b: beam.b, h: beam.h, length: beam.length },
+        d.flexLeft, d.flexMid, d.flexRight,
+        d.shear, d.deflection,
+        mat.fc, mat.fy, mat.fyt,
+        d.span, Mu_max, d.Vu,
+        effFlangeW, slabProps.thickness,
+      );
+      map.set(d.beamId, diag);
+    }
+    return map;
+  }, [beamDesigns, beamsWithLoads, mat]);
+
+  const colLoads = useMemo(() => {
+    if (!analyzed) return new Map<string, { Pu: number; Mu: number }>();
+    return calculateColumnLoads(columns, beamsWithLoads, frameResults);
+  }, [analyzed, columns, beamsWithLoads, frameResults]);
+
+  // 2D frame results (kept only for comparison/fallback paths)
+  const frameResults2D = useMemo(() => {
+    if (!analyzed) return [] as FrameResult[];
+    const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
+    return frames.map(f => analyzeFrame(f, bMap, columns, mat));
+  }, [analyzed, frames, beamsWithLoads, columns, mat]);
+
+  // 2D column loads (kept for comparison/fallback)
+  const colLoadsBiaxial = useMemo(() => {
+    if (!analyzed) return new Map<string, { Pu: number; Mx: number; My: number; MxTop: number; MxBot: number; MyTop: number; MyBot: number }>();
+    return calculateColumnLoadsBiaxial(columns, beamsWithLoads, frameResults2D, stories);
+  }, [analyzed, columns, beamsWithLoads, frameResults2D, stories]);
+
+  // 3D column loads — PRIMARY results for design
+  const colLoads3D = useMemo(() => {
+    if (!analyzed || frames.length === 0) return new Map();
+    try {
+      return getColumnLoads3D(frames, beamsWithLoads, columns, mat, frameEndReleases, detectedConnections);
+    } catch {
+      // Fallback to 2D if 3D fails
+      return colLoadsBiaxial;
+    }
+  }, [analyzed, frames, beamsWithLoads, columns, mat, colLoadsBiaxial]);
+
+  const jointConnectivity = useMemo(() => {
+    if (!analyzed) return [] as JointConnectivityInfo[];
+    return getJointConnectivityInfo(columns, beamsWithLoads, frameResults);
+  }, [analyzed, columns, beamsWithLoads, frameResults]);
+
+  const colDesigns = useMemo(() => {
+    return columns.filter(c => !c.isRemoved).map(c => {
+      const loads = colLoads3D.get(c.id) || { Pu: 0, Mx: 0, My: 0, MxTop: 0, MxBot: 0, MyTop: 0, MyBot: 0 };
+      return {
+        ...c, Pu: loads.Pu, Mx: loads.Mx, My: loads.My,
+        Mu: Math.max(loads.Mx, loads.My),
+        design: designColumnBiaxial(
+          loads.Pu, loads.Mx, loads.My, c.b, c.h, mat.fc, mat.fy, c.L,
+          undefined, undefined,
+          loads.MxTop, loads.MxBot, loads.MyTop, loads.MyBot,
+        ),
+      };
+    });
+  }, [columns, colLoads3D, mat]);
+
+  // Bent-up bars calculation
+  const bentUpResults = useMemo(() => {
+    if (!analyzed) return [] as FrameBentUpResult[];
+    const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
+    // Collect all secondary (carried) beam IDs from detected connections
+    // Secondary beams must NOT have bent-up bars (they sit on hinges, bars run straight)
+    const secBeamIds = new Set<string>();
+    for (const conn of detectedConnections) {
+      for (const id of conn.secondaryBeamIds) secBeamIds.add(id);
+    }
+    return frames.map(f => {
+      const fr = frameResults.find(r => r.frameId === f.id);
+      if (!fr) return null;
+      return calculateFrameBentUp(f, bMap, fr, mat, frames, secBeamIds);
+    }).filter(Boolean) as FrameBentUpResult[];
+  }, [analyzed, frames, beamsWithLoads, frameResults, mat, detectedConnections]);
+
+  const slabDesigns = useMemo(() =>
+    slabs.map(s => ({ ...s, design: designSlab(s, slabProps, mat, slabs, columns) })),
+    [slabs, slabProps, mat, columns]
+  );
+
+  const handleCanvasClick = useCallback((x: number, y: number) => {
+    if (activeTool === 'node') {
+      modelManager.createNode(x, y, 0);
+      dispatch({ type: 'INC_MODEL_VERSION' });
+    } else if (activeTool === 'beam' || activeTool === 'column') {
+      if (!pendingNode) {
+        dispatch({ type: 'SET_PENDING_NODE', node: { x, y } });
+      } else {
+        const ni = modelManager.createNode(pendingNode.x, pendingNode.y, 0);
+        if (activeTool === 'beam') {
+          const nj = modelManager.createNode(x, y, 0);
+          const sections = modelManager.getAllSections();
+          const beamSec = sections.find(s => s.type === 'beam') || modelManager.createSection('B', beamB, beamH, 'beam');
+          modelManager.createBeam(ni.id, nj.id, beamSec.id);
+        } else {
+          const nj = modelManager.createNode(x, y, -(colL / 1000));
+          const sections = modelManager.getAllSections();
+          const colSec = sections.find(s => s.type === 'column') || modelManager.createSection('C', colB, colH, 'column');
+          modelManager.createColumn(nj.id, ni.id, colSec.id);
+        }
+        dispatch({ type: 'SET_PENDING_NODE', node: null });
+        dispatch({ type: 'INC_MODEL_VERSION' });
+      }
+    } else if (activeTool === 'delete') {
+      const nearest = modelManager.getAllNodes().find(n =>
+        Math.abs(n.x - x) < 0.3 && Math.abs(n.y - y) < 0.3
+      );
+      if (nearest) {
+        modelManager.deleteNode(nearest.id);
+        dispatch({ type: 'INC_MODEL_VERSION' });
+      }
+    }
+  }, [activeTool, pendingNode, beamB, beamH, colB, colH, colL]);
+
+  const handleNodeClick = useCallback((id: number) => {
+    dispatch({ type: 'SELECT_NODE', id });
+    if (activeTool === 'delete') {
+      modelManager.deleteNode(id);
+      dispatch({ type: 'SELECT_NODE', id: null });
+      dispatch({ type: 'INC_MODEL_VERSION' });
+    }
+  }, [activeTool]);
+
+  const handleFrameClick = useCallback((id: number) => {
+    dispatch({ type: 'SELECT_FRAME', id });
+    if (activeTool === 'delete') {
+      modelManager.deleteElement(id);
+      dispatch({ type: 'SELECT_FRAME', id: null });
+      dispatch({ type: 'INC_MODEL_VERSION' });
+    }
+  }, [activeTool]);
+
+  const handleAreaClick = useCallback((id: number) => {
+    dispatch({ type: 'SELECT_AREA', id });
+    if (activeTool === 'delete') {
+      modelManager.deleteArea(id);
+      dispatch({ type: 'SELECT_AREA', id: null });
+      dispatch({ type: 'INC_MODEL_VERSION' });
+    }
+  }, [activeTool]);
+
+  const handleNodeRestraintChange = useCallback((nodeId: number, restraints: any) => {
+    modelManager.setNodeRestraints(nodeId, restraints);
+    dispatch({ type: 'INC_MODEL_VERSION' });
+  }, []);
+
+  const handleFrameLongPress = useCallback((id: number) => {
+    dispatch({ type: 'OPEN_ELEM_PROPS', frameId: id });
+  }, []);
+
+  const handleAreaLongPress = useCallback((id: number) => {
+    dispatch({ type: 'OPEN_ELEM_PROPS', areaId: id });
+  }, []);
+
+  const handleElemPropsSave = useCallback((data: any) => {
+    if (data.frameId != null) {
+      modelManager.updateFrameSection(data.frameId, data.b, data.h);
+      if (data.nodeIRestraints) {
+        const frame = modelManager.getFrame(data.frameId);
+        if (frame) {
+          modelManager.setNodeRestraints(frame.nodeI, data.nodeIRestraints);
+          modelManager.setNodeRestraints(frame.nodeJ, data.nodeJRestraints);
+          // Persist end releases in state keyed by node positions so they survive model rebuilds
+          const nodeI = modelManager.getNode(frame.nodeI);
+          const nodeJ = modelManager.getNode(frame.nodeJ);
+          if (nodeI && nodeJ) {
+            const posKey = `${nodeI.x.toFixed(3)}_${nodeI.y.toFixed(3)}_${nodeJ.x.toFixed(3)}_${nodeJ.y.toFixed(3)}`;
+            dispatch({ type: 'SET_FRAME_END_RELEASES', posKey, nodeIRestraints: data.nodeIRestraints, nodeJRestraints: data.nodeJRestraints });
+          }
+        }
+      }
+    }
+    if (data.areaId != null && data.thickness != null) {
+      modelManager.updateAreaThickness(data.areaId, data.thickness);
+    }
+    if (data.areaId != null) {
+      const override: any = {};
+      if (data.thickness != null) override.thickness = data.thickness;
+      if (data.finishLoad != null) override.finishLoad = data.finishLoad;
+      if (data.liveLoad != null) override.liveLoad = data.liveLoad;
+      if (data.cover != null) override.cover = data.cover;
+      if (Object.keys(override).length > 0) {
+        dispatch({ type: 'SET_SLAB_PROPS_OVERRIDE', areaId: data.areaId, override });
+      }
+    }
+    dispatch({ type: 'INC_MODEL_VERSION' });
+    dispatch({ type: 'RESET_ANALYSIS' });
+  }, []);
+
+  const handleAnalysisElementClick = useCallback((beamId: string) => {
+    const design = beamDesigns.find(d => d.beamId === beamId);
+    const beam = beamsWithLoads.find(b => b.id === beamId);
+    if (!design || !beam) return;
+    const wu = 1.2 * beam.deadLoad + 1.6 * beam.liveLoad;
+    dispatch({
+      type: 'OPEN_DIAGRAM',
+      data: {
+        elementId: beamId,
+        elementType: 'beam' as const,
+        span: design.span / 1000,
+        Mleft: design.Mleft,
+        Mmid: design.Mmid,
+        Mright: design.Mright,
+        Vu: design.Vu,
+        deflection: design.deflection.deflection,
+        wu,
+        Rleft: design.Rleft,
+        Rright: design.Rright,
+      },
+    });
+  }, [beamDesigns, beamsWithLoads]);
+
+  const currentNodes = modelManager.getAllNodes();
+  const currentFrames = modelManager.getAllFrames();
+  const currentAreas = modelManager.getAllAreas();
+  const modelStats = modelManager.getStats();
+
+  // Handle long-press from LevelPlanView (maps string element IDs to frame/area numeric IDs)
+  const handleLevelElementLongPress = useCallback((type: 'beam' | 'column' | 'slab', id: string) => {
+    if (type === 'slab') {
+      const area = currentAreas.find(a => a.label === id || `A${a.id}` === id);
+      if (area) dispatch({ type: 'OPEN_ELEM_PROPS', areaId: area.id });
+    } else {
+      const frame = currentFrames.find(f => {
+        if (f.type === type) {
+          const label = type === 'beam' ? `B${f.id}` : `C${f.id}`;
+          return f.label === id || label === id || f.id.toString() === id;
+        }
+        return false;
+      });
+      if (frame) dispatch({ type: 'OPEN_ELEM_PROPS', frameId: frame.id });
+    }
+  }, [currentFrames, currentAreas]);
+
+  // Build mapping from ModelManager column frame IDs to column labels (C1, C2...)
+  // Filter by selected story so labels update when switching stories
+  const columnLabels = useMemo(() => {
+    const labelMap = new Map<number, string>();
+    const columnFrames = currentFrames.filter(f => f.type === 'column');
+    // Filter columns by selected story (or all)
+    const storyCols = isAllStories ? columns : columns.filter(c => c.storyId === selectedStoryId);
+    for (const frame of columnFrames) {
+      const topNode = currentNodes.find(n => n.id === frame.nodeJ);
+      if (!topNode) continue;
+      const matchingCol = storyCols.find(c => 
+        Math.abs(c.x - topNode.x) < 0.01 && Math.abs(c.y - topNode.y) < 0.01
+      );
+      if (matchingCol) {
+        labelMap.set(frame.id, matchingCol.id);
+      }
+    }
+    return labelMap;
+  }, [currentFrames, currentNodes, columns, selectedStoryId, isAllStories]);
+
+  const handleSelectElement = (type: 'beam' | 'column' | 'slab', id: string) => {
+    dispatch({ type: 'OPEN_MODAL', element: { type, id } });
+  };
+
+  // Helper: get bent-up-adjusted top bars for a beam
+  const getBentUpData = (beamId: string) => {
+    for (const fr of bentUpResults) {
+      const b = fr.beams.find(bb => bb.beamId === beamId);
+      if (b) return b;
+    }
+    return null;
+  };
+
+  const getModalData = () => {
+    if (!selectedElement) return null;
+    const { type, id } = selectedElement;
+    if (type === 'beam') {
+      const beam = beamsWithLoads.find(b => b.id === id);
+      const design = beamDesigns.find(d => d.beamId === id);
+      if (!beam) return null;
+      const bent = getBentUpData(id);
+      const topDia = design ? design.flexLeft.dia : 12;
+      // Use bent-up adjusted bars if available
+      const topLeftBars = bent ? Math.max(bent.additionalTopLeft, 2) : (design ? design.flexLeft.bars : 3);
+      const topRightBars = bent ? Math.max(bent.additionalTopRight, 2) : (design ? design.flexRight.bars : 3);
+      const finalTopBars = bent ? bent.finalTopBars : Math.max(topLeftBars, topRightBars);
+      const bottomMidBars = design ? design.flexMid.bars : 3;
+      const bottomDia = design ? design.flexMid.dia : 12;
+      const remainingBottom = bent ? bent.bentUp.remainingBottomBars : bottomMidBars;
+      return {
+        dimensions: { b: beam.b, h: beam.h, length: beam.length * 1000 },
+        reinforcement: design ? {
+          top: { bars: finalTopBars, dia: topDia },
+          bottom: { bars: bottomMidBars, dia: bottomDia },
+          topLeft: { bars: topLeftBars, dia: topDia },
+          topRight: { bars: topRightBars, dia: topDia },
+          topMid: { bars: 2, dia: topDia },
+          bottomMid: { bars: bottomMidBars, dia: bottomDia },
+          bottomSupport: { bars: remainingBottom, dia: bottomDia },
+          bentUpBars: bent ? bent.bentUp.bentBarsCount : 0,
+          bentUpDia: bent ? bent.bentUp.bentDia : 0,
+          stirrups: design.shear.stirrups,
+        } : { top: { bars: 3, dia: 12 }, bottom: { bars: 3, dia: 12 }, stirrups: 'Φ10@200mm' },
+      };
+    }
+    if (type === 'column') {
+      const col = colDesigns.find(c => c.id === id);
+      if (!col) return null;
+      return {
+        dimensions: { b: col.b, h: col.h, length: col.L },
+        reinforcement: { top: { bars: col.design.bars, dia: col.design.dia }, stirrups: col.design.stirrups },
+      };
+    }
+    if (type === 'slab') {
+      const slab = slabDesigns.find(s => s.id === id);
+      if (!slab) return null;
+      return {
+        dimensions: { b: Math.abs(slab.x2 - slab.x1) * 1000, h: Math.abs(slab.y2 - slab.y1) * 1000 },
+        reinforcement: { shortDir: slab.design.shortDir, longDir: slab.design.longDir },
+      };
+    }
+    return null;
+  };
+
+  const modalData = getModalData();
+
+  // ParamInput moved outside component to prevent focus loss
+
+  return (
+    <div className="flex flex-col h-screen overflow-hidden">
+      {/* Header */}
+      <AppHeader 
+        title="Structural Master"
+        leftSlot={
+          <div className="w-9 h-9 rounded-xl bg-primary-foreground/20 flex items-center justify-center shrink-0">
+            <Building2 size={18} />
+          </div>
+        }
+        rightSlot={
+          <div className="flex items-center gap-2">
+            <button className="w-8 h-8 rounded-lg bg-primary-foreground/10 flex items-center justify-center">
+              <Search size={16} />
+            </button>
+            <div className="w-8 h-8 rounded-full bg-primary-foreground/20 flex items-center justify-center text-xs font-bold">
+              <Compass size={16} />
+            </div>
+          </div>
+        }
+      />
+
+      {/* Main Content */}
+      <div className="flex-1 overflow-hidden">
+        <Tabs value={activeTab} onValueChange={tab => dispatch({ type: 'SET_ACTIVE_TAB', tab })} className="h-full flex flex-col">
+          
+          {/* Sub-tabs within each main section */}
+          {mainTab === 'reports' && (
+            <TabsList className="w-full justify-start rounded-none border-b border-border bg-card px-2 overflow-x-auto shrink-0 h-auto">
+              <TabsTrigger value="design" className="text-xs gap-1 min-h-[40px]"><Ruler size={14} />التصميم</TabsTrigger>
+              <TabsTrigger value="results" className="text-xs gap-1 min-h-[40px]"><BarChart3 size={14} />النتائج</TabsTrigger>
+              <TabsTrigger value="export" className="text-xs gap-1 min-h-[40px]"><Download size={14} />التصدير</TabsTrigger>
+            </TabsList>
+          )}
+          {mainTab === 'inputs' && (
+            <TabsList className="w-full justify-start rounded-none border-b border-border bg-card px-2 overflow-x-auto shrink-0 h-auto">
+              <TabsTrigger value="input" className="text-xs gap-1 min-h-[40px]"><Settings2 size={14} />المدخلات</TabsTrigger>
+              <TabsTrigger value="slabs" className="text-xs gap-1 min-h-[40px]"><Layers size={14} />الإدخال</TabsTrigger>
+              <TabsTrigger value="building" className="text-xs gap-1 min-h-[40px]"><Building size={14} />مبنى متعدد</TabsTrigger>
+            </TabsList>
+          )}
+          {mainTab === 'modeling' && (
+            <TabsList className="w-full justify-start rounded-none border-b border-border bg-card px-2 overflow-x-auto shrink-0 h-auto">
+              <TabsTrigger value="modeler" className="text-xs gap-1 min-h-[40px]"><Grid3X3 size={14} />النمذجة</TabsTrigger>
+              <TabsTrigger value="view" className="text-xs gap-1 min-h-[40px]"><Eye size={14} />العرض</TabsTrigger>
+              <TabsTrigger value="analysis" className="text-xs gap-1 min-h-[40px]"><Calculator size={14} />التحليل</TabsTrigger>
+            </TabsList>
+          )}
+
+          {/* MODELER TAB */}
+          <TabsContent value="modeler" className="flex-1 overflow-hidden mt-0">
+            <div className="flex flex-col h-full">
+              {/* Level filter bar */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-muted/30 shrink-0">
+                <Layers size={14} className="text-muted-foreground" />
+                <label className="text-xs font-medium text-muted-foreground">فلتر المنسوب:</label>
+                <select
+                  className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                  value={modelerElevation}
+                  onChange={e => setModelerElevation(Number(e.target.value))}
+                >
+                  <option value={-1}>الكل (مسقط أفقي)</option>
+                  {availableElevations.map(elev => (
+                    <option key={elev} value={elev}>
+                      المنسوب {(elev / 1000).toFixed(1)} م
+                      {elev === 0 ? ' (الأرض / الركائز)' : ''}
+                    </option>
+                  ))}
+                </select>
+                {modelerElevation >= 0 && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {modelerElevation === 0 ? 'مسقط الأساسات' : `المنسوب ${(modelerElevation / 1000).toFixed(1)} م`}
+                  </Badge>
+                )}
+              </div>
+
+              {/* Show support plan view when ground level or specific elevation selected */}
+              {modelerElevation >= 0 ? (
+                <div className="flex-1 overflow-hidden">
+                  <LevelPlanView
+                    columns={columns}
+                    beams={beamsWithLoads}
+                    slabs={slabs}
+                    stories={stories}
+                    selectedElevation={modelerElevation}
+                    onColumnSupportChange={handleColumnSupportChange}
+                    onSupportRestraintsChange={handleSupportRestraintsChange}
+                    supportRestraints={supportRestraints}
+                    onElementLongPress={handleLevelElementLongPress}
+                  />
+                </div>
+              ) : (
+                <div className="flex flex-1 overflow-hidden">
+                  <ToolPalette
+                    activeTool={activeTool}
+                    onToolChange={tool => dispatch({ type: 'SET_ACTIVE_TOOL', tool })}
+                    mode={mode}
+                    onModeChange={(m) => dispatch({ type: 'SET_MODE', mode: m })}
+                  />
+                  <ModelCanvas
+                    nodes={currentNodes}
+                    frames={currentFrames}
+                    areas={currentAreas}
+                    activeTool={activeTool}
+                    onCanvasClick={handleCanvasClick}
+                    onNodeClick={handleNodeClick}
+                    onFrameClick={handleFrameClick}
+                    onAreaClick={handleAreaClick}
+                    onFrameLongPress={handleFrameLongPress}
+                    onAreaLongPress={handleAreaLongPress}
+                    selectedNodeId={selectedNodeId}
+                    selectedFrameId={selectedFrameId}
+                    selectedAreaId={selectedAreaId}
+                    pendingNode={pendingNode}
+                    columnLabels={columnLabels}
+                    frameEndReleases={frameEndReleases}
+                  />
+                  <PropertyPanel
+                    selectedNode={selectedNodeId ? currentNodes.find(n => n.id === selectedNodeId) : null}
+                    selectedFrame={selectedFrameId ? currentFrames.find(f => f.id === selectedFrameId) : null}
+                    selectedArea={selectedAreaId ? currentAreas.find(a => a.id === selectedAreaId) : null}
+                    onNodeRestraintChange={handleNodeRestraintChange}
+                    modelStats={modelStats}
+                  />
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* INPUT TAB - with sub-tabs for original + auto-design */}
+          <TabsContent value="input" className="flex-1 overflow-hidden mt-0">
+            <Tabs defaultValue="input-main" className="h-full flex flex-col">
+              <TabsList className="w-full justify-start rounded-none border-b border-border bg-muted/30 px-2 shrink-0 h-auto">
+                <TabsTrigger value="input-main" className="text-[11px] gap-1 min-h-[36px]"><Settings2 size={12} />المدخلات</TabsTrigger>
+                <TabsTrigger value="input-auto" className="text-[11px] gap-1 min-h-[36px] text-accent"><Wand2 size={12} />تصميم تلقائي</TabsTrigger>
+              </TabsList>
+              <TabsContent value="input-main" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+                <div className="space-y-4 max-w-4xl">
+                  {/* Story Management */}
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">إدارة الأدوار</CardTitle></CardHeader>
+                    <CardContent>
+                      <StoryManager
+                        stories={stories}
+                        selectedStoryId={selectedStoryId}
+                        onSelectStory={id => dispatch({ type: 'SELECT_STORY', storyId: id })}
+                        onAddStory={() => dispatch({ type: 'ADD_STORY' })}
+                        onRemoveStory={id => dispatch({ type: 'REMOVE_STORY', storyId: id })}
+                        onUpdateStory={(id, updates) => dispatch({ type: 'UPDATE_STORY', storyId: id, updates })}
+                        onCopyElements={(from, to) => dispatch({ type: 'COPY_STORY_ELEMENTS', fromStoryId: from, toStoryId: to })}
+                      />
+                    </CardContent>
+                  </Card>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">خصائص المواد</CardTitle></CardHeader>
+                    <CardContent className="grid grid-cols-2 gap-3">
+                      <ParamInput label="f'c (MPa)" value={mat.fc} onChange={v => dispatch({ type: 'SET_MAT', mat: { fc: v } })} />
+                      <ParamInput label="fy (MPa)" value={mat.fy} onChange={v => dispatch({ type: 'SET_MAT', mat: { fy: v } })} />
+                      <ParamInput label="fyt (MPa)" value={mat.fyt} onChange={v => dispatch({ type: 'SET_MAT', mat: { fyt: v } })} />
+                      <ParamInput label="γ (kN/m³)" value={mat.gamma} onChange={v => dispatch({ type: 'SET_MAT', mat: { gamma: v } })} />
+                    </CardContent>
+                    <CardFooter className="pt-2">
+                      <Button size="sm" className="w-full h-9 text-xs" onClick={() => dispatch({ type: 'SAVE_SNAPSHOT', message: 'تم حفظ خصائص المواد ✓' })}>
+                        <Save size={14} className="mr-1" />حفظ التغييرات
+                      </Button>
+                    </CardFooter>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">خصائص البلاطة</CardTitle></CardHeader>
+                    <CardContent className="grid grid-cols-2 gap-3">
+                      <ParamInput label="السماكة (مم)" value={slabProps.thickness} onChange={v => dispatch({ type: 'SET_SLAB_PROPS', props: { thickness: v } })} />
+                      <ParamInput label="أحمال التشطيب (kN/m²)" value={slabProps.finishLoad} onChange={v => dispatch({ type: 'SET_SLAB_PROPS', props: { finishLoad: v } })} />
+                      <ParamInput label="الحمل الحي (kN/m²)" value={slabProps.liveLoad} onChange={v => dispatch({ type: 'SET_SLAB_PROPS', props: { liveLoad: v } })} />
+                      <ParamInput label="الغطاء (مم)" value={slabProps.cover} onChange={v => dispatch({ type: 'SET_SLAB_PROPS', props: { cover: v } })} />
+                    </CardContent>
+                    <CardFooter className="pt-2">
+                      <Button size="sm" className="w-full h-9 text-xs" onClick={() => dispatch({ type: 'SAVE_SNAPSHOT', message: 'تم حفظ خصائص البلاطة ✓' })}>
+                        <Save size={14} className="mr-1" />حفظ التغييرات
+                      </Button>
+                    </CardFooter>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">أبعاد العناصر</CardTitle></CardHeader>
+                    <CardContent className="grid grid-cols-2 gap-3">
+                      <ParamInput label="عرض الجسر (مم)" value={beamB} onChange={v => dispatch({ type: 'SET_BEAM_B', value: v })} />
+                      <ParamInput label="ارتفاع الجسر (مم)" value={beamH} onChange={v => dispatch({ type: 'SET_BEAM_H', value: v })} />
+                      <ParamInput label="عرض العمود (مم)" value={colB} onChange={v => dispatch({ type: 'SET_COL_B', value: v })} />
+                      <ParamInput label="عمق العمود (مم)" value={colH} onChange={v => dispatch({ type: 'SET_COL_H', value: v })} />
+                    </CardContent>
+                    <CardFooter className="pt-2">
+                      <Button size="sm" className="w-full h-9 text-xs" onClick={() => dispatch({ type: 'SAVE_SNAPSHOT', message: 'تم حفظ أبعاد العناصر ✓' })}>
+                        <Save size={14} className="mr-1" />حفظ التغييرات
+                      </Button>
+                    </CardFooter>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">ملخص</CardTitle></CardHeader>
+                    <CardContent className="space-y-2 text-sm">
+                      <p>{stories.length} أدوار</p>
+                      <p>{columns.filter(c => !c.isRemoved).length} أعمدة (لكل دور)</p>
+                      <p>{beams.length} جسور (لكل دور)</p>
+                      <p>{frames.length} إطارات (لكل دور)</p>
+                      <Button onClick={runAnalysis} className="w-full min-h-[44px] mt-2">
+                        <Calculator size={16} className="mr-2" />تشغيل التحليل (جميع الأدوار)
+                      </Button>
+                    </CardContent>
+                  </Card>
+                  </div>
+                </div>
+              </TabsContent>
+              <TabsContent value="input-auto" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+                <AutoDesignPanel
+                  slabs={slabs}
+                  onApply={(result: AutoDesignResult) => {
+                    dispatch({ type: 'SET_SLAB_PROPS', props: { thickness: result.slabThickness, finishLoad: result.slabProps.finishLoad, liveLoad: result.slabProps.liveLoad } });
+                    dispatch({ type: 'SET_BEAM_B', value: result.beamB });
+                    dispatch({ type: 'SET_BEAM_H', value: result.beamH });
+                    dispatch({ type: 'SET_COL_B', value: result.colB });
+                    dispatch({ type: 'SET_COL_H', value: result.colH });
+                    dispatch({ type: 'SET_MAT', mat: result.matProps });
+                    dispatch({ type: 'SET_COL_L', value: result.slabProps.thickness > 0 ? state.colL : 4000 });
+                    dispatch({ type: 'SAVE_SNAPSHOT', message: 'تم تطبيق التصميم التلقائي ✓' });
+                  }}
+                />
+              </TabsContent>
+            </Tabs>
+          </TabsContent>
+
+          {/* SLABS / INPUT TAB - with sub-tabs for original + generative + ai-assistant */}
+          <TabsContent value="slabs" className="flex-1 overflow-hidden mt-0">
+            <Tabs defaultValue="slabs-main" className="h-full flex flex-col">
+              <TabsList className="w-full justify-start rounded-none border-b border-border bg-muted/30 px-2 shrink-0 h-auto">
+                <TabsTrigger value="slabs-main" className="text-[11px] gap-1 min-h-[36px]"><Layers size={12} />الإدخال</TabsTrigger>
+                <TabsTrigger value="slabs-generative" className="text-[11px] gap-1 min-h-[36px] text-accent"><Zap size={12} />تصميم توليدي</TabsTrigger>
+                <TabsTrigger value="slabs-ai" className="text-[11px] gap-1 min-h-[36px] text-accent"><Bot size={12} />المساعد الذكي</TabsTrigger>
+              </TabsList>
+              <TabsContent value="slabs-main" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+                <div className="space-y-4 max-w-5xl">
+                  {/* Story filter for this tab */}
+                  <StorySelector
+                    stories={stories}
+                    selectedStoryId={selectedStoryId}
+                    onSelectStory={id => dispatch({ type: 'SELECT_STORY', storyId: id })}
+                    onAddStory={() => dispatch({ type: 'ADD_STORY' })}
+                    onRemoveStory={id => dispatch({ type: 'REMOVE_STORY', storyId: id })}
+                    onUpdateStory={(id, updates) => dispatch({ type: 'UPDATE_STORY', storyId: id, updates })}
+                    onCopyElements={(from, to) => dispatch({ type: 'COPY_STORY_ELEMENTS', fromStoryId: from, toStoryId: to })}
+                    compact
+                  />
+                  
+                  {/* Slabs table */}
+                  <Card>
+                    <CardHeader className="pb-2 flex-row items-center justify-between">
+                      <CardTitle className="text-sm">إحداثيات البلاطات (م) - {isAllStories ? 'جميع الأدوار' : getStoryLabel(selectedStoryId)}</CardTitle>
+                      <Button onClick={() => dispatch({ type: 'ADD_SLAB', slab: { id: `S${slabs.length + 1}`, x1: 0, y1: 0, x2: 5, y2: 4, storyId: selectedStoryId === '__ALL__' ? stories[0]?.id : selectedStoryId } })} size="sm" variant="outline" className="min-h-[44px] gap-1"><Plus size={14} /> إضافة بلاطة</Button>
+                    </CardHeader>
+                    <CardContent className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            {[...(isAllStories ? ['الدور'] : []),'الاسم','X1','Y1','X2','Y2','المنسوب Z (م)','Lx','Ly','النوع','حذف'].map(h => (
+                              <TableHead key={h} className="text-xs">{h}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {storyFilteredSlabs.map((s) => {
+                            const i = slabs.indexOf(s);
+                            const sd = slabDesigns.find(sd => sd.id === s.id)?.design;
+                            return (
+                              <TableRow key={`${s.storyId}-${s.id}`}>
+                                {isAllStories && <TableCell className="text-xs font-medium text-muted-foreground">{getStoryLabel(s.storyId)}</TableCell>}
+                                <TableCell><Input value={s.id} onChange={e => dispatch({ type: 'UPDATE_SLAB', index: i, key: 'id', value: e.target.value })} className="h-10 w-16 font-mono text-xs" /></TableCell>
+                                <TableCell><Input type="number" value={s.x1} onChange={e => dispatch({ type: 'UPDATE_SLAB', index: i, key: 'x1', value: e.target.value })} className="h-10 w-16 font-mono text-xs" /></TableCell>
+                                <TableCell><Input type="number" value={s.y1} onChange={e => dispatch({ type: 'UPDATE_SLAB', index: i, key: 'y1', value: e.target.value })} className="h-10 w-16 font-mono text-xs" /></TableCell>
+                                <TableCell><Input type="number" value={s.x2} onChange={e => dispatch({ type: 'UPDATE_SLAB', index: i, key: 'x2', value: e.target.value })} className="h-10 w-16 font-mono text-xs" /></TableCell>
+                                <TableCell><Input type="number" value={s.y2} onChange={e => dispatch({ type: 'UPDATE_SLAB', index: i, key: 'y2', value: e.target.value })} className="h-10 w-16 font-mono text-xs" /></TableCell>
+                                <TableCell className="font-mono text-xs">{((stories.find(st => st.id === s.storyId)?.elevation ?? 0) + (stories.find(st => st.id === s.storyId)?.height ?? colL)).toFixed(0)}</TableCell>
+                                <TableCell className="font-mono text-xs">{sd?.lx.toFixed(1)}</TableCell>
+                                <TableCell className="font-mono text-xs">{sd?.ly.toFixed(1)}</TableCell>
+                                <TableCell className="text-xs">{sd?.isOneWay ? 'اتجاه واحد' : 'اتجاهين'}</TableCell>
+                                <TableCell><Button onClick={() => dispatch({ type: 'REMOVE_SLAB', index: i })} variant="ghost" size="sm" className="text-destructive h-10 w-10 p-0"><Trash2 size={14} /></Button></TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+
+                  {/* Generate Beams Button */}
+                  <Card>
+                    <CardContent className="py-3">
+                      <Button 
+                        onClick={() => dispatch({ type: 'GENERATE_BEAMS_MANUAL' })} 
+                        className="w-full min-h-[44px] gap-2"
+                        variant="outline"
+                      >
+                        <Wand2 size={16} />إنشاء الجسور تلقائياً
+                      </Button>
+                      <p className="text-xs text-muted-foreground mt-2 text-center">
+                        ينشئ الجسور بناءً على مواقع الأعمدة والبلاطات الحالية
+                      </p>
+                    </CardContent>
+                  </Card>
+
+                  {/* Beams table - Editable with Wall Loads */}
+                  <Card>
+                    <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                      <CardTitle className="text-sm">الجسور ({beams.length})</CardTitle>
+                      <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => {
+                        const id = `BM${extraBeams.length + 1}`;
+                        dispatch({ type: 'ADD_EXTRA_BEAM', beam: {
+                          id, fromCol: '', toCol: '', x1: 0, y1: 0, x2: 5, y2: 0,
+                          length: 5, direction: 'horizontal', b: beamB, h: beamH,
+                          deadLoad: 0, liveLoad: 0, wallLoad: 0, slabs: [],
+                        }});
+                      }}><Plus size={14} className="mr-1" />إضافة جسر</Button>
+                    </CardHeader>
+                    <CardContent className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            {['الجسر','X1','Y1','X2','Y2','المنسوب Z','الطول','العرض','الارتفاع','حمل جدار (kN/m)','تحرير الأطراف','حذف'].map(h => (
+                              <TableHead key={h} className="text-xs">{h}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {beams.map(b => {
+                            const isExtra = extraBeams.some(eb => eb.id === b.id);
+                            const wallLoad = beamOverrides[b.id]?.wallLoad || b.wallLoad || 0;
+                            const releaseState = getBeamReleaseState(b);
+                            const hasRelease = Object.values(releaseState.nodeI).some(Boolean) || Object.values(releaseState.nodeJ).some(Boolean);
+                            const releasedEndsCount = Number(Object.values(releaseState.nodeI).some(Boolean)) + Number(Object.values(releaseState.nodeJ).some(Boolean));
+                            // Check if this beam is a secondary (carried) beam with auto-release
+                            const isAutoReleased = detectedConnections.some(conn => conn.secondaryBeamIds.includes(b.id));
+                            return (
+                            <TableRow key={b.id} className={removedBeamIds.includes(b.id) ? 'opacity-40 line-through' : ''}>
+                              <TableCell className="font-mono text-xs">{b.id}{removedBeamIds.includes(b.id) ? ' 🗑️' : ''}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.x1.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.y1.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.x2.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.y2.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(b.z ?? 0).toFixed(0)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.length.toFixed(2)}</TableCell>
+                              <TableCell>
+                                <Input type="number" value={b.b} className="h-8 w-16 font-mono text-xs"
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value) || 0;
+                                    if (isExtra) {
+                                      dispatch({ type: 'UPDATE_EXTRA_BEAM', id: b.id, updates: { b: val } });
+                                    } else {
+                                      dispatch({ type: 'SET_BEAM_OVERRIDE', beamId: b.id, override: { b: val } });
+                                    }
+                                  }} />
+                              </TableCell>
+                              <TableCell>
+                                <Input type="number" value={b.h} className="h-8 w-16 font-mono text-xs"
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value) || 0;
+                                    if (isExtra) {
+                                      dispatch({ type: 'UPDATE_EXTRA_BEAM', id: b.id, updates: { h: val } });
+                                    } else {
+                                      dispatch({ type: 'SET_BEAM_OVERRIDE', beamId: b.id, override: { h: val } });
+                                    }
+                                  }} />
+                              </TableCell>
+                              <TableCell>
+                                <Input type="number" value={wallLoad} className="h-8 w-20 font-mono text-xs"
+                                  placeholder="0"
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value) || 0;
+                                    if (isExtra) {
+                                      dispatch({ type: 'UPDATE_EXTRA_BEAM', id: b.id, updates: { wallLoad: val } });
+                                    } else {
+                                      dispatch({ type: 'SET_BEAM_OVERRIDE', beamId: b.id, override: { wallLoad: val } });
+                                    }
+                                  }} />
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex min-w-[150px] items-center gap-2">
+                                  <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => openBeamReleaseEditor(b)}>
+                                    تحرير
+                                  </Button>
+                                  <Badge variant={hasRelease ? 'default' : 'outline'} className="text-[10px] whitespace-nowrap">
+                                    {hasRelease
+                                      ? `محرر ${releasedEndsCount}/2${isAutoReleased ? ' (تلقائي)' : ''}`
+                                      : (isAutoReleased ? 'تحرير تلقائي عند التحليل' : 'بدون تحرير')}
+                                  </Badge>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                {removedBeamIds.includes(b.id) ? (
+                                  <Button onClick={() => dispatch({ type: 'TOGGLE_BEAM_REMOVAL', beamId: b.id })}
+                                    variant="outline" size="sm" className="h-8 text-xs text-primary"><RotateCcw size={14} className="mr-1" />استعادة</Button>
+                                ) : (
+                                  <Button onClick={() => {
+                                    if (isExtra) {
+                                      dispatch({ type: 'REMOVE_EXTRA_BEAM', id: b.id });
+                                    } else {
+                                      dispatch({ type: 'TOGGLE_BEAM_REMOVAL', beamId: b.id });
+                                    }
+                                  }}
+                                    variant="ghost" size="sm" className="text-destructive h-8 w-8 p-0"><Trash2 size={14} /></Button>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+
+                  {/* Columns table - Editable */}
+                  <Card>
+                    <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                      <CardTitle className="text-sm">الأعمدة ({columns.filter(c => !c.isRemoved).length})</CardTitle>
+                      <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => {
+                        const id = `CM${extraColumns.length + 1}`;
+                        dispatch({ type: 'ADD_EXTRA_COLUMN', column: { id, x: 0, y: 0, b: colB, h: colH, L: colL } });
+                      }}><Plus size={14} className="mr-1" />إضافة عمود</Button>
+                    </CardHeader>
+                    <CardContent className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                             {['العمود','X','Y','Z أسفل','Z أعلى','العرض','العمق','الارتفاع','الحالة','إزالة/استعادة','حذف'].map(h => (
+                               <TableHead key={h} className="text-xs">{h}</TableHead>
+                             ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {columns.map(c => {
+                            const isExtra = extraColumns.some(ec => ec.id === c.id);
+                            return (
+                            <TableRow key={c.id} className={c.isRemoved ? 'opacity-40' : ''}>
+                              <TableCell className="font-mono text-xs">{c.id}</TableCell>
+                              <TableCell>
+                                {isExtra ? (
+                                  <Input type="number" value={c.x} className="h-8 w-16 font-mono text-xs"
+                                    onChange={e => dispatch({ type: 'UPDATE_EXTRA_COLUMN', id: c.id, updates: { x: parseFloat(e.target.value) || 0 } })} />
+                                ) : <span className="font-mono text-xs">{c.x.toFixed(2)}</span>}
+                              </TableCell>
+                              <TableCell>
+                                {isExtra ? (
+                                  <Input type="number" value={c.y} className="h-8 w-16 font-mono text-xs"
+                                    onChange={e => dispatch({ type: 'UPDATE_EXTRA_COLUMN', id: c.id, updates: { y: parseFloat(e.target.value) || 0 } })} />
+                                ) : <span className="font-mono text-xs">{c.y.toFixed(2)}</span>}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {(c.zBottom ?? 0).toFixed(0)}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {(c.zTop ?? 0).toFixed(0)}
+                              </TableCell>
+                              <TableCell>
+                                <Input type="number" value={c.b} className="h-8 w-16 font-mono text-xs"
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value) || 0;
+                                    if (isExtra) {
+                                      dispatch({ type: 'UPDATE_EXTRA_COLUMN', id: c.id, updates: { b: val } });
+                                    } else {
+                                      dispatch({ type: 'SET_COL_OVERRIDE', colId: c.id, override: { b: val } });
+                                    }
+                                  }} />
+                              </TableCell>
+                              <TableCell>
+                                <Input type="number" value={c.h} className="h-8 w-16 font-mono text-xs"
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value) || 0;
+                                    if (isExtra) {
+                                      dispatch({ type: 'UPDATE_EXTRA_COLUMN', id: c.id, updates: { h: val } });
+                                    } else {
+                                      dispatch({ type: 'SET_COL_OVERRIDE', colId: c.id, override: { h: val } });
+                                    }
+                                  }} />
+                              </TableCell>
+                              <TableCell>
+                                <Input type="number" value={c.L} className="h-8 w-16 font-mono text-xs"
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value) || 0;
+                                    if (isExtra) {
+                                      dispatch({ type: 'UPDATE_EXTRA_COLUMN', id: c.id, updates: { L: val } });
+                                    } else {
+                                      dispatch({ type: 'SET_COL_OVERRIDE', colId: c.id, override: { L: val } });
+                                    }
+                                  }} />
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant={c.isRemoved ? "destructive" : "default"} className="text-[10px]">
+                                  {c.isRemoved ? 'محذوف' : 'فعال'}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>
+                                {!isExtra && (
+                                  <Button onClick={() => dispatch({ type: 'TOGGLE_COLUMN_REMOVAL', colId: c.id })} variant="ghost" size="sm" className="h-8 text-xs">
+                                    {c.isRemoved ? 'استعادة' : 'إزالة'}
+                                  </Button>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                {isExtra && (
+                                  <Button onClick={() => dispatch({ type: 'REMOVE_EXTRA_COLUMN', id: c.id })}
+                                    variant="ghost" size="sm" className="text-destructive h-8 w-8 p-0"><Trash2 size={14} /></Button>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                </div>
+              </TabsContent>
+              <TabsContent value="slabs-generative" className="flex-1 overflow-hidden mt-0">
+                <GenerativeDesignDashboard
+                  onApplyOption={(ev: EvaluatedOption) => {
+                    dispatch({
+                      type: 'APPLY_GENERATIVE',
+                      slabs: (ev.option.slabs?.length ? ev.option.slabs : slabs) as Slab[],
+                      beamB: ev.option.sections.beamB,
+                      beamH: ev.option.sections.beamH,
+                      colB: ev.option.sections.colB,
+                      colH: ev.option.sections.colH,
+                    });
+                  }}
+                />
+              </TabsContent>
+              <TabsContent value="slabs-ai" className="flex-1 overflow-hidden mt-0">
+                <AIAssistantPanel
+                  onModelGenerated={(newSlabs) => {
+                    dispatch({ type: 'SET_SLABS', slabs: newSlabs });
+                    dispatch({ type: 'SET_MODE', mode: 'auto' });
+                    dispatch({ type: 'SET_ACTIVE_TAB', tab: 'modeler' });
+                  }}
+                  onClose={() => dispatch({ type: 'SET_ACTIVE_TAB', tab: 'modeler' })}
+                />
+              </TabsContent>
+            </Tabs>
+          </TabsContent>
+
+          {/* VIEW TAB */}
+          <TabsContent value="view" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm">العرض ثنائي الأبعاد</CardTitle></CardHeader>
+              <CardContent>
+                {!analyzed && <Button onClick={runAnalysis} className="mb-3 min-h-[44px]">تشغيل التحليل</Button>}
+                <BuildingView
+                  slabs={slabs} beams={beamsWithLoads} columns={columns}
+                  analyzed={analyzed} frameResults={frameResults}
+                  beamDesigns={beamDesigns} colDesigns={colDesigns}
+                  onSelectElement={handleSelectElement}
+                  removedColumnIds={removedColumnIds} bobConnections={bobConnections}
+                />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* ANALYSIS TAB */}
+          <TabsContent value="analysis" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+            {!analyzed ? (
+              <Card><CardContent className="py-12 text-center">
+                <p className="text-muted-foreground mb-4">يرجى تشغيل التحليل أولاً</p>
+                <Button onClick={runAnalysis} className="min-h-[44px]">تشغيل التحليل</Button>
+              </CardContent></Card>
+            ) : (
+              <div className="space-y-4">
+                {/* Story filter for analysis */}
+                <StorySelector
+                  stories={stories} selectedStoryId={selectedStoryId}
+                  onSelectStory={id => dispatch({ type: 'SELECT_STORY', storyId: id })}
+                  onAddStory={() => dispatch({ type: 'ADD_STORY' })}
+                  onRemoveStory={id => dispatch({ type: 'REMOVE_STORY', storyId: id })}
+                  onUpdateStory={(id, updates) => dispatch({ type: 'UPDATE_STORY', storyId: id, updates })}
+                  onCopyElements={(from, to) => dispatch({ type: 'COPY_STORY_ELEMENTS', fromStoryId: from, toStoryId: to })}
+                  compact
+                />
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">الأحمال على الجسور (kN/m)</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','الجسر','DL','LL','1.4D','1.2D+1.6L','البلاطات'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map(story => 
+                          (isAllStories || story.id === selectedStoryId) &&
+                          beamsWithLoads.filter(b => b.storyId === story.id).map(b => (
+                            <TableRow key={`${story.id}-${b.id}`}>
+                              <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.id}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.deadLoad.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.liveLoad.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(1.4 * b.deadLoad).toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(1.2 * b.deadLoad + 1.6 * b.liveLoad).toFixed(2)}</TableCell>
+                              <TableCell className="text-xs">{b.slabs.join(', ')}</TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+                {frameResults.map(fr => (
+                  <Card key={fr.frameId}>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm">إطار {fr.frameId} <span className="text-muted-foreground text-xs">(اضغط على جسر لعرض الرسومات)</span></CardTitle>
+                    </CardHeader>
+                    <CardContent className="overflow-x-auto">
+                      <Table>
+                        <TableHeader><TableRow>
+                          {['الجسر','البحر','M علوي يسار','M سفلي أقصى','M علوي يمين','Vu','📊'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                        </TableRow></TableHeader>
+                        <TableBody>
+                          {fr.beams.map(b => {
+                            const midMoment = b.Mmid;
+                            return (
+                            <TableRow key={b.beamId} className="cursor-pointer hover:bg-accent/10" onClick={() => handleAnalysisElementClick(b.beamId)}>
+                              <TableCell className="font-mono text-xs">{b.beamId}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.span.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs" style={{ color: b.Mleft < 0 ? 'hsl(0 84.2% 60.2%)' : 'hsl(142 71% 45%)' }}>{b.Mleft.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs font-bold" style={{ color: midMoment > 0 ? 'hsl(142 71% 45%)' : 'hsl(0 84.2% 60.2%)' }}>{midMoment.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs" style={{ color: b.Mright < 0 ? 'hsl(0 84.2% 60.2%)' : 'hsl(142 71% 45%)' }}>{b.Mright.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.Vu.toFixed(2)}</TableCell>
+                              <TableCell><Badge variant="outline" className="text-[10px] cursor-pointer">رسومات</Badge></TableCell>
+                            </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                ))}
+
+                {/* Column Analysis Results - Biaxial - Multi-story */}
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">نتائج تحليل الأعمدة (ثنائي المحور) - جميع الأدوار</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','العمود','b×h','Pu (kN)','Mx أعلى','Mx أسفل','My أعلى','My أسفل','النحافة X','النحافة Y','الارتفاع'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map((story, storyIdx) => 
+                          (isAllStories || story.id === selectedStoryId) &&
+                          colDesigns.filter(c => c.storyId === story.id).map(c => {
+                            const storiesAbove = stories.length - storyIdx;
+                            const accumulatedPu = c.Pu * storiesAbove;
+                            const loads = colLoads3D.get(c.id);
+                            return (
+                            <TableRow key={`${story.id}-${c.id}`} className="cursor-pointer hover:bg-accent/10" onClick={() => {
+                              const loads = colLoads3D.get(c.id);
+                              dispatch({
+                                type: 'OPEN_DIAGRAM',
+                                data: {
+                                  elementId: c.id,
+                                  elementType: 'column' as const,
+                                  span: (story.height || 3000) / 1000,
+                                  colLength: story.height || 3000,
+                                  MxTop: loads?.MxTop || 0,
+                                  MxBot: loads?.MxBot || 0,
+                                  MyTop: loads?.MyTop || 0,
+                                  MyBot: loads?.MyBot || 0,
+                                  Pu: accumulatedPu,
+                                },
+                              });
+                            }}>
+                              <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                              <TableCell className="font-mono text-xs">{c.id}</TableCell>
+                              <TableCell className="font-mono text-xs">{c.b}×{c.h}</TableCell>
+                              <TableCell className="font-mono text-xs font-bold">{accumulatedPu.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(loads?.MxTop || 0).toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(loads?.MxBot || 0).toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(loads?.MyTop || 0).toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{(loads?.MyBot || 0).toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{c.design.slendernessStatusX}</TableCell>
+                              <TableCell className="font-mono text-xs">{c.design.slendernessStatusY}</TableCell>
+                              <TableCell className="font-mono text-xs">{story.height}</TableCell>
+                            </TableRow>
+                            );
+                          })
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                {/* Joint Connectivity - Column Above/Below at each joint */}
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">تفاصيل اتصال الأعمدة بالركائز (العمود العلوي والسفلي)</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الفريم','الركيزة','X','Y','Z','العمود العلوي','b×h علوي','طول علوي','Z علوي','العمود السفلي','b×h سفلي','طول سفلي','Z سفلي','نسبة علوي','نسبة سفلي'].map((h, i) => <TableHead key={`${h}-${i}`} className="text-xs whitespace-nowrap">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {jointConnectivity.map((j, idx) => (
+                          <TableRow key={idx}>
+                            <TableCell className="font-mono text-xs font-bold">{j.frameId}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.jointColId}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.jointX.toFixed(2)}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.jointY.toFixed(2)}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.jointZ.toFixed(0)}</TableCell>
+                            <TableCell className="font-mono text-xs text-blue-600 dark:text-blue-400">{j.colAboveId ?? '—'}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.colAboveB && j.colAboveH ? `${j.colAboveB}×${j.colAboveH}` : '—'}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.colAboveL?.toFixed(0) ?? '—'}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.colAboveZBot != null && j.colAboveZTop != null ? `${j.colAboveZBot.toFixed(0)}→${j.colAboveZTop.toFixed(0)}` : '—'}</TableCell>
+                            <TableCell className="font-mono text-xs text-orange-600 dark:text-orange-400">{j.colBelowId ?? '—'}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.colBelowB && j.colBelowH ? `${j.colBelowB}×${j.colBelowH}` : '—'}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.colBelowL?.toFixed(0) ?? '—'}</TableCell>
+                            <TableCell className="font-mono text-xs">{j.colBelowZBot != null && j.colBelowZTop != null ? `${j.colBelowZBot.toFixed(0)}→${j.colBelowZTop.toFixed(0)}` : '—'}</TableCell>
+                            <TableCell className="font-mono text-xs font-bold">{(j.distributionTop * 100).toFixed(1)}%</TableCell>
+                            <TableCell className="font-mono text-xs font-bold">{(j.distributionBot * 100).toFixed(1)}%</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+                {/* ETABS Comparison Table */}
+                <ETABSComparisonTable
+                  frames={frames}
+                  beams={beamsWithLoads}
+                  columns={columns}
+                  mat={mat}
+                  stories={stories}
+                />
+              </div>
+            )}
+          </TabsContent>
+
+          {/* DESIGN TAB */}
+          <TabsContent value="design" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+            {!analyzed ? (
+              <Card><CardContent className="py-12 text-center">
+                <p className="text-muted-foreground">يرجى تشغيل التحليل أولاً</p>
+              </CardContent></Card>
+            ) : (
+              <div className="space-y-4">
+                {/* Story filter for design */}
+                <StorySelector
+                  stories={stories} selectedStoryId={selectedStoryId}
+                  onSelectStory={id => dispatch({ type: 'SELECT_STORY', storyId: id })}
+                  onAddStory={() => dispatch({ type: 'ADD_STORY' })}
+                  onRemoveStory={id => dispatch({ type: 'REMOVE_STORY', storyId: id })}
+                  onUpdateStory={(id, updates) => dispatch({ type: 'UPDATE_STORY', storyId: id, updates })}
+                  onCopyElements={(from, to) => dispatch({ type: 'COPY_STORY_ELEMENTS', fromStoryId: from, toStoryId: to })}
+                  compact
+                />
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">تصميم الجسور - الانحناء والتشوه والتشخيص</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','الجسر','علوي يسار','سفلي أقصى','علوي يمين','δ (mm)','L/δ','الحالة','التشخيص'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map(story => 
+                          (isAllStories || story.id === selectedStoryId) &&
+                          beamDesigns.filter(d => {
+                            const beam = beamsWithLoads.find(b => b.id === d.beamId);
+                            return beam?.storyId === story.id;
+                          }).map(d => {
+                          const bent = getBentUpData(d.beamId);
+                          const topLeftBars = bent ? Math.max(bent.additionalTopLeft, 2) : d.flexLeft.bars;
+                          const topRightBars = bent ? Math.max(bent.additionalTopRight, 2) : d.flexRight.bars;
+                          const diag = beamDiagnostics.get(d.beamId);
+                          return (
+                          <React.Fragment key={`${story.id}-${d.beamId}`}>
+                          <TableRow className="cursor-pointer" onClick={() => handleSelectElement('beam', d.beamId)}>
+                            <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                            <TableCell className="font-mono text-xs">{d.beamId}</TableCell>
+                            <TableCell className="font-mono text-xs">{topLeftBars}Φ{d.flexLeft.dia}</TableCell>
+                            <TableCell className="font-mono text-xs">{d.flexMid.bars}Φ{d.flexMid.dia}</TableCell>
+                            <TableCell className="font-mono text-xs">{topRightBars}Φ{d.flexRight.dia}</TableCell>
+                            <TableCell className="font-mono text-xs">{d.deflection.deflection.toFixed(1)}</TableCell>
+                            <TableCell className="font-mono text-xs">{d.deflection.deflectionRatio.toFixed(0)}</TableCell>
+                            <TableCell>
+                              <Badge variant={diag?.isAdequate ? "default" : "destructive"} className="text-[10px]">
+                                {diag?.isAdequate ? 'آمن ✓' : 'تجاوز ✗'}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-xs max-w-[200px]">
+                              {diag && !diag.isAdequate && (
+                                <span className="text-destructive font-medium">{diag.overallStatus}</span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                          {diag && !diag.isAdequate && diag.failures.map((f, idx) => (
+                            <TableRow key={`${d.beamId}-fail-${idx}`} className="bg-destructive/5 border-0">
+                              <TableCell colSpan={8} className="py-1 px-4">
+                                <div className="flex flex-col gap-0.5 text-[11px]">
+                                  <div className="flex items-start gap-2">
+                                    <Badge variant="outline" className="text-[9px] shrink-0 border-destructive text-destructive">
+                                      {f.aciRef}
+                                    </Badge>
+                                    <span className="text-destructive">{f.description} (تجاوز {f.exceedPercent.toFixed(0)}%)</span>
+                                  </div>
+                                  <div className="text-muted-foreground mr-2">
+                                    💡 <strong>الحل:</strong> {f.solution}
+                                  </div>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                          </React.Fragment>
+                          );
+                          })
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">تصميم القص</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','الجسر','Vu','Vc','Vs','الكانات'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map(story =>
+                          (isAllStories || story.id === selectedStoryId) &&
+                          beamDesigns.filter(d => {
+                            const beam = beamsWithLoads.find(b => b.id === d.beamId);
+                            return beam?.storyId === story.id;
+                          }).map(d => (
+                            <TableRow key={`${story.id}-${d.beamId}`}>
+                              <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                              <TableCell className="font-mono text-xs">{d.beamId}</TableCell>
+                              <TableCell className="font-mono text-xs">{d.Vu.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{d.shear.Vc.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{d.shear.Vs.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{d.shear.stirrups}</TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">تصميم الأعمدة (Bresler - ثنائي المحور)</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','العمود','Pu','Mx المضخم','My المضخم','Bresler','النحافة','الحالة','التسليح'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map((story, storyIdx) =>
+                          (isAllStories || story.id === selectedStoryId) &&
+                          colDesigns.filter(c => c.storyId === story.id).map(c => {
+                            const storiesAbove = stories.length - storyIdx;
+                            const accPu = c.Pu * storiesAbove;
+                            return (
+                          <TableRow key={`${story.id}-${c.id}`} className="cursor-pointer" onClick={() => handleSelectElement('column', c.id)}>
+                            <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                            <TableCell className="font-mono text-xs">{c.id}</TableCell>
+                            <TableCell className="font-mono text-xs font-bold">{accPu.toFixed(1)}</TableCell>
+                            <TableCell className="font-mono text-xs">{c.design.MxMagnified.toFixed(1)}</TableCell>
+                            <TableCell className="font-mono text-xs">{c.design.MyMagnified.toFixed(1)}</TableCell>
+                            <TableCell className="font-mono text-xs">{c.design.breslerRatio.toFixed(2)}</TableCell>
+                            <TableCell className="text-xs">
+                              {c.design.checkSlenderness}
+                              {c.design.isSlenderX && (
+                                <span className="block text-destructive text-[10px] mt-0.5">
+                                  X: نحيف (kLu/r={c.design.kLu_rx.toFixed(1)}) → B المطلوب ≥ {c.design.requiredBForNonSlender}mm {c.b >= c.design.requiredBForNonSlender ? '✓' : `(الحالي ${c.b}mm)`}
+                                </span>
+                              )}
+                              {c.design.isSlenderY && (
+                                <span className="block text-destructive text-[10px] mt-0.5">
+                                  Y: نحيف (kLu/r={c.design.kLu_ry.toFixed(1)}) → H المطلوب ≥ {c.design.requiredHForNonSlender}mm {c.h >= c.design.requiredHForNonSlender ? '✓' : `(الحالي ${c.h}mm)`}
+                                </span>
+                              )}
+                              {c.design.suggestRotation && (
+                                <span className="block text-accent text-[10px] mt-0.5 font-semibold">
+                                  💡 {c.design.rotationReason}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant={c.design.biaxialAdequate ? "default" : "destructive"} className="text-[10px]">
+                                {c.design.biaxialAdequate ? 'آمن' : 'غير آمن'}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">{c.design.bars}Φ{c.design.dia}</TableCell>
+                          </TableRow>
+                            );
+                          })
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                {/* Bent-Up Bars Table */}
+                {bentUpResults.length > 0 && (
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">تكسيح الحديد (Bent-up Bars) - ACI 318-19</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    {bentUpResults.map(fr => (
+                      <div key={fr.frameId} className="mb-4">
+                        <p className="text-xs font-semibold mb-1 text-primary">{fr.frameId}</p>
+                        <Table>
+                          <TableHeader><TableRow>
+                            {['الجسر','سفلي أصلي','مكسح','سفلي متبقي','علوي مطلوب L','علوي مطلوب R','مساهمة تكسيح L','مساهمة تكسيح R','علوي إضافي','علوي نهائي'].map(h => <TableHead key={h} className="text-[10px]">{h}</TableHead>)}
+                          </TableRow></TableHeader>
+                          <TableBody>
+                            {fr.beams.map(b => (
+                              <TableRow key={b.beamId}>
+                                <TableCell className="font-mono text-xs">{b.beamId}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.originalBottomBars}Φ{b.bottomDia}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.bentUp.bentBarsCount}Φ{b.bentUp.bentDia}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.bentUp.remainingBottomBars}Φ{b.bottomDia}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.requiredTopLeft}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.requiredTopRight}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.bentContributionLeft}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.bentContributionRight}</TableCell>
+                                <TableCell className="font-mono text-xs">{Math.max(b.additionalTopLeft, b.additionalTopRight)}</TableCell>
+                                <TableCell className="font-mono text-xs font-bold">{b.finalTopBars}Φ{b.topDia}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+                )}
+
+                {/* Slab Punching Shear */}
+                {slabDesigns.some(s => s.design.punchingShear) && (
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">فحص الثقب (Punching Shear)</CardTitle></CardHeader>
+                    <CardContent className="overflow-x-auto">
+                      <Table>
+                        <TableHeader><TableRow>
+                          {['البلاطة','Vu','Vc','معامل الأمان','الحالة'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                        </TableRow></TableHeader>
+                        <TableBody>
+                          {slabDesigns.filter(s => s.design.punchingShear).map(s => (
+                            <TableRow key={s.id}>
+                              <TableCell className="font-mono text-xs">{s.id}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.punchingShear!.Vu.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.punchingShear!.Vc.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.punchingShear!.punchingSafetyFactor.toFixed(2)}</TableCell>
+                              <TableCell>
+                                <Badge variant={s.design.punchingShear!.adequate ? "default" : "destructive"} className="text-[10px]">
+                                  {s.design.punchingShear!.adequate ? 'آمن' : 'غير آمن'}
+                                </Badge>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            )}
+          </TabsContent>
+
+          {/* RESULTS TAB */}
+          <TabsContent value="results" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+            {!analyzed ? (
+              <Card><CardContent className="py-12 text-center">
+                <p className="text-muted-foreground">يرجى تشغيل التحليل أولاً</p>
+              </CardContent></Card>
+            ) : (
+              <div className="space-y-4">
+                {/* Story filter for results */}
+                <StorySelector
+                  stories={stories} selectedStoryId={selectedStoryId}
+                  onSelectStory={id => dispatch({ type: 'SELECT_STORY', storyId: id })}
+                  onAddStory={() => dispatch({ type: 'ADD_STORY' })}
+                  onRemoveStory={id => dispatch({ type: 'REMOVE_STORY', storyId: id })}
+                  onUpdateStory={(id, updates) => dispatch({ type: 'UPDATE_STORY', storyId: id, updates })}
+                  onCopyElements={(from, to) => dispatch({ type: 'COPY_STORY_ELEMENTS', fromStoryId: from, toStoryId: to })}
+                  compact
+                />
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">نتائج البلاطات</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','البلاطة','Lx','Ly','h','Wu','تسليح قصير','تسليح طويل'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map(story =>
+                          (isAllStories || story.id === selectedStoryId) &&
+                          slabDesigns.map(s => (
+                            <TableRow key={`${story.id}-${s.id}`} className="cursor-pointer" onClick={() => handleSelectElement('slab', s.id)}>
+                              <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.id}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.lx.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.ly.toFixed(1)}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.hUsed}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.Wu.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.shortDir.bars}Φ{s.design.shortDir.dia}</TableCell>
+                              <TableCell className="font-mono text-xs">{s.design.longDir.bars}Φ{s.design.longDir.dia}</TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">ملخص تسليح الجسور</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','الجسر','b×h','علوي يسار','سفلي وسط','علوي يمين','الكانات'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map(story =>
+                          (isAllStories || story.id === selectedStoryId) &&
+                          beamDesigns.map(d => {
+                            const beam = beamsWithLoads.find(b => b.id === d.beamId);
+                            const bent = getBentUpData(d.beamId);
+                            const topLeftBars = bent ? Math.max(bent.additionalTopLeft, 2) : d.flexLeft.bars;
+                            const topRightBars = bent ? Math.max(bent.additionalTopRight, 2) : d.flexRight.bars;
+                            return (
+                              <TableRow key={`${story.id}-${d.beamId}`} className="cursor-pointer" onClick={() => handleSelectElement('beam', d.beamId)}>
+                                <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                                <TableCell className="font-mono text-xs">{d.beamId}</TableCell>
+                                <TableCell className="font-mono text-xs">{beam?.b}×{beam?.h}</TableCell>
+                                <TableCell className="font-mono text-xs">{topLeftBars}Φ{d.flexLeft.dia}</TableCell>
+                                <TableCell className="font-mono text-xs">{d.flexMid.bars}Φ{d.flexMid.dia}</TableCell>
+                                <TableCell className="font-mono text-xs">{topRightBars}Φ{d.flexRight.dia}</TableCell>
+                                <TableCell className="font-mono text-xs">{d.shear.stirrups}</TableCell>
+                              </TableRow>
+                            );
+                          })
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">ملخص تسليح الأعمدة</CardTitle></CardHeader>
+                  <CardContent className="overflow-x-auto">
+                    <Table>
+                      <TableHeader><TableRow>
+                        {['الدور','العمود','b×h','Pu','Mu','ρ%','الحالة','التسليح','الكانات'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                      </TableRow></TableHeader>
+                      <TableBody>
+                        {stories.map((story, storyIdx) =>
+                          (isAllStories || story.id === selectedStoryId) &&
+                          colDesigns.map(c => {
+                            const storiesAbove = stories.length - storyIdx;
+                            const accPu = c.Pu * storiesAbove;
+                            return (
+                              <TableRow key={`${story.id}-${c.id}`} className="cursor-pointer" onClick={() => handleSelectElement('column', c.id)}>
+                                <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                                <TableCell className="font-mono text-xs">{c.id}</TableCell>
+                                <TableCell className="font-mono text-xs">{c.b}×{c.h}</TableCell>
+                                <TableCell className="font-mono text-xs font-bold">{accPu.toFixed(1)}</TableCell>
+                                <TableCell className="font-mono text-xs">{c.design.MuMagnified.toFixed(1)}</TableCell>
+                                <TableCell className="font-mono text-xs">{(c.design.rhoActual * 100).toFixed(1)}</TableCell>
+                                <TableCell>
+                                  <Badge variant={c.design.adequate ? "default" : "destructive"} className="text-[10px]">
+                                    {c.design.adequate ? 'كافي' : 'غير كافي'}
+                                  </Badge>
+                                </TableCell>
+                                <TableCell className="font-mono text-xs">{c.design.bars}Φ{c.design.dia}</TableCell>
+                                <TableCell className="font-mono text-xs">{c.design.stirrups}</TableCell>
+                              </TableRow>
+                            );
+                          })
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+          </TabsContent>
+
+          {/* EXPORT TAB */}
+          <TabsContent value="export" className="flex-1 overflow-auto p-4">
+            <div className="max-w-5xl space-y-6">
+              {/* Main Export Panel with Floor Selector */}
+              <ExportPanel
+                stories={stories}
+                slabs={slabs}
+                beams={beamsWithLoads}
+                columns={columns}
+                beamDesigns={beamDesigns as any}
+                colDesigns={colDesigns}
+                slabDesigns={slabs.map(s => ({ ...s, design: designSlab(s, slabProps, mat, slabs, columns) }))}
+                mat={mat}
+                slabProps={slabProps}
+                projectName="Structural Design Studio"
+                analyzed={analyzed}
+              />
+
+              {/* Additional quick export buttons */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <Card>
+                  <CardHeader><CardTitle className="text-sm">تقرير PDF</CardTitle></CardHeader>
+                  <CardContent className="space-y-2">
+                    <Button className="w-full min-h-[44px]" disabled={!analyzed} onClick={() => {
+                      const slabDesignsData = slabs.map(s => ({ ...s, design: designSlab(s, slabProps, mat, slabs, columns) }));
+                      generateStructuralReport(slabs, beamsWithLoads, columns, frames, frameResults, beamDesigns as any, colDesigns, slabDesignsData, mat, slabProps, 'Structural Design Studio', stories);
+                    }}>تقرير التصميم الإنشائي</Button>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader><CardTitle className="text-sm">تصدير DXF</CardTitle></CardHeader>
+                  <CardContent className="space-y-2">
+                    <Button className="w-full min-h-[44px]" variant="outline" onClick={() => downloadDXF(generateStructuralDXF(slabs, beamsWithLoads, columns), 'structural_plan.dxf')}>مخطط إنشائي</Button>
+                    <Button className="w-full min-h-[44px]" variant="outline" onClick={() => downloadDXF(generateBeamLayoutDXF(beamsWithLoads, columns, slabs), 'beam_layout.dxf')}>مخطط الجسور</Button>
+                    <Button className="w-full min-h-[44px]" variant="outline" onClick={() => downloadDXF(generateColumnLayoutDXF(columns, slabs), 'column_layout.dxf')}>مخطط الأعمدة</Button>
+                    <Button className="w-full min-h-[44px]" variant="outline" disabled={!analyzed} onClick={() => {
+                      const rebarData = beamDesigns.map(d => {
+                        const beam = beamsWithLoads.find(b => b.id === d.beamId);
+                        return beam ? { beamId: d.beamId, b: beam.b, h: beam.h, x1: beam.x1, y1: beam.y1, x2: beam.x2, y2: beam.y2, topBars: Math.max(d.flexLeft.bars, d.flexRight.bars), topDia: d.flexLeft.dia, botBars: d.flexMid.bars, botDia: d.flexMid.dia, stirrups: d.shear.stirrups } : null;
+                      }).filter(Boolean) as any[];
+                      downloadDXF(generateReinforcementDXF(slabs, beamsWithLoads, columns, rebarData), 'reinforcement.dxf');
+                    }}>مخطط التسليح</Button>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Beam Rebar Detail Views */}
+              {analyzed && beamDesigns.length > 0 && (
+                <div className="mt-6 space-y-4">
+                  <h3 className="text-sm font-semibold text-foreground">تفاصيل تسليح الجسور</h3>
+                  {beamDesigns.map(d => {
+                    const beam = beamsWithLoads.find(b => b.id === d.beamId);
+                    if (!beam) return null;
+                    const bent = getBentUpData(d.beamId);
+                    return (
+                      <BeamRebarDetailView
+                        key={d.beamId}
+                        beamId={d.beamId}
+                        b={beam.b}
+                        h={beam.h}
+                        span={d.span}
+                        flexLeft={d.flexLeft}
+                        flexMid={d.flexMid}
+                        flexRight={d.flexRight}
+                        shear={d.shear}
+                        hasBentBars={!!bent}
+                        additionalTopLeft={bent?.additionalTopLeft}
+                        additionalTopRight={bent?.additionalTopRight}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* MULTI-STORY BUILDING TAB */}
+          <TabsContent value="building" className="flex-1 overflow-hidden mt-0">
+            <MultiStoryDesigner
+              initialSlabs={slabs}
+              mat={mat}
+              slabProps={slabProps}
+              beamB={beamB}
+              beamH={beamH}
+              colB={colB}
+              colH={colH}
+              onClose={() => dispatch({ type: 'SET_ACTIVE_TAB', tab: 'modeler' })}
+            />
+          </TabsContent>
+
+          {/* PROJECTS TAB */}
+          <TabsContent value="projects" className="flex-1 overflow-hidden mt-0">
+            <ProjectManager
+              currentState={state}
+              onLoadProject={(data) => dispatch({ type: 'LOAD_PROJECT', data })}
+              onNewProject={() => dispatch({ type: 'RESET_TO_DEFAULT' })}
+              storyCount={stories.length}
+              slabCount={slabs.length}
+            />
+          </TabsContent>
+
+          {/* GENERATIVE TAB */}
+          <TabsContent value="generative" className="flex-1 overflow-hidden mt-0">
+            <GenerativeDesignDashboard
+              onApplyOption={(ev: EvaluatedOption) => {
+                dispatch({
+                  type: 'APPLY_GENERATIVE',
+                  slabs: (ev.option.slabs?.length ? ev.option.slabs : slabs) as Slab[],
+                  beamB: ev.option.sections.beamB,
+                  beamH: ev.option.sections.beamH,
+                  colB: ev.option.sections.colB,
+                  colH: ev.option.sections.colH,
+                });
+                setMainTab('modeling');
+                dispatch({ type: 'SET_ACTIVE_TAB', tab: 'modeler' });
+              }}
+            />
+          </TabsContent>
+        </Tabs>
+      </div>
+
+      {/* Rebar Detail Modal */}
+      {selectedElement && modalData && (
+        <RebarDetailModal
+          open={modalOpen}
+          onClose={() => dispatch({ type: 'CLOSE_MODAL' })}
+          elementType={selectedElement.type}
+          elementId={selectedElement.id}
+          dimensions={modalData.dimensions}
+          reinforcement={modalData.reinforcement}
+        />
+      )}
+
+      <Dialog open={!!releaseEditorBeamId} onOpenChange={(open) => !open && setReleaseEditorBeamId(null)}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-base">تحرير أطراف الجسر {releaseEditorBeam?.id}</DialogTitle>
+            <DialogDescription>
+              عدّل Releases للجسر مباشرة من تبويب الإدخال، وأي حفظ هنا يلغي نتائج التحليل السابقة حتى تعيد التشغيل بالقيم الجديدة.
+            </DialogDescription>
+          </DialogHeader>
+
+          {releaseEditorBeam && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-2 text-xs text-muted-foreground md:grid-cols-3">
+                <div>من ({releaseEditorBeam.x1.toFixed(2)}, {releaseEditorBeam.y1.toFixed(2)})</div>
+                <div>إلى ({releaseEditorBeam.x2.toFixed(2)}, {releaseEditorBeam.y2.toFixed(2)})</div>
+                <div>المنسوب Z: {((releaseEditorBeam.z ?? 0) / 1000).toFixed(2)} م</div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {([
+                  { key: 'nodeI' as const, title: 'الطرف I (بداية الجسر)' },
+                  { key: 'nodeJ' as const, title: 'الطرف J (نهاية الجسر)' },
+                ]).map(({ key, title }) => (
+                  <div key={key} className="space-y-3 rounded-lg border border-border bg-card p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+                      <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => resetReleaseEditorEnd(key)}>
+                        تصفير الطرف
+                      </Button>
+                    </div>
+                    <div className="space-y-2">
+                      {RELEASE_DOF_META.map(({ key: dof, etabs, desc }) => (
+                        <label key={`${key}-${dof}`} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                          <div className="space-y-0.5">
+                            <div className="font-mono text-xs text-foreground">{etabs}</div>
+                            <div className="text-[11px] text-muted-foreground">{desc}</div>
+                          </div>
+                          <Checkbox
+                            checked={releaseEditorData[key][dof]}
+                            onCheckedChange={(checked) => handleReleaseEditorToggle(key, dof, checked === true)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {releaseEditorWarnings.length > 0 && (
+                <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                  {releaseEditorWarnings.map((warning) => (
+                    <p key={warning} className="text-xs font-medium text-destructive">⚠ {warning}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setReleaseEditorBeamId(null)}>إلغاء</Button>
+            <Button type="button" onClick={saveBeamReleaseEditor}>حفظ التحرير</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Element Properties Dialog (long-press) */}
+      <ElementPropertiesDialog
+        open={elemPropsOpen}
+        onClose={() => dispatch({ type: 'CLOSE_ELEM_PROPS' })}
+        frame={elemPropsFrameId != null ? currentFrames.find(f => f.id === elemPropsFrameId) : null}
+        area={elemPropsAreaId != null ? currentAreas.find(a => a.id === elemPropsAreaId) : null}
+        nodeI={elemPropsFrameId != null ? (() => { const f = currentFrames.find(fr => fr.id === elemPropsFrameId); return f ? currentNodes.find(n => n.id === f.nodeI) : null; })() : null}
+        nodeJ={elemPropsFrameId != null ? (() => { const f = currentFrames.find(fr => fr.id === elemPropsFrameId); return f ? currentNodes.find(n => n.id === f.nodeJ) : null; })() : null}
+        slabProps={elemPropsAreaId != null ? { ...slabProps, ...(slabPropsOverrides[elemPropsAreaId] || {}) } : null}
+        onSave={handleElemPropsSave}
+      />
+
+      {/* Analysis Diagram Dialog */}
+      <AnalysisDiagramDialog
+        open={diagramOpen}
+        onClose={() => dispatch({ type: 'CLOSE_DIAGRAM' })}
+        data={diagramData}
+      />
+
+      {/* Bottom Navigation */}
+      <BottomNav 
+        activeTab={mainTab} 
+        onTabChange={(tab) => {
+          setMainTab(tab);
+          // Auto-switch to first sub-tab of the section
+          if (tab === 'reports') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'design' });
+          else if (tab === 'inputs') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'input' });
+          else if (tab === 'modeling') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'modeler' });
+          else if (tab === 'projects') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'projects' });
+        }}
+      />
+    </div>
+  );
+};
+
+export default Index;
