@@ -910,23 +910,50 @@ const Index = () => {
     const beam = beamsWithLoads.find(b => b.id === beamId);
     if (!design || !beam) return;
     const wu = 1.2 * beam.deadLoad + 1.6 * beam.liveLoad;
+
+    // Determine moment release (hinge) status at each end
+    let hingeLeft = false;
+    let hingeRight = false;
+    // BOB secondary beams: hinge at the removed-column end
+    for (const conn of detectedConnections) {
+      if (conn.secondaryBeamIds.includes(beamId)) {
+        if (beam.fromCol === conn.removedColumnId) hingeLeft = true;
+        if (beam.toCol   === conn.removedColumnId) hingeRight = true;
+      }
+    }
+    // User-defined frame end releases (rz = moment release)
+    const releaseState = getBeamReleaseState(beam);
+    if (releaseState.nodeI.rz) hingeLeft  = true;
+    if (releaseState.nodeJ.rz) hingeRight = true;
+
+    // Carrier-beam point load (from BOB connections on this beam as primary)
+    const carrierConn = bobConnections.find(c => c.primaryBeamId === beamId);
+
     dispatch({
       type: 'OPEN_DIAGRAM',
       data: {
         elementId: beamId,
         elementType: 'beam' as const,
-        span: design.span / 1000,
-        Mleft: design.Mleft,
-        Mmid: design.Mmid,
-        Mright: design.Mright,
+        // design.span is beam.length in metres — no unit conversion needed
+        span: design.span,
+        Mleft: hingeLeft  ? 0 : design.Mleft,
+        Mmid:  design.Mmid,
+        Mright: hingeRight ? 0 : design.Mright,
         Vu: design.Vu,
         deflection: design.deflection.deflection,
         wu,
-        Rleft: design.Rleft,
+        Rleft:  design.Rleft,
         Rright: design.Rright,
+        hingeLeft,
+        hingeRight,
+        // Point-load info for carrier beams (distanceOnPrimary is in metres)
+        ...(carrierConn ? {
+          pointLoadP: carrierConn.reactionForce,
+          pointLoadA: carrierConn.distanceOnPrimary,
+        } : {}),
       },
     });
-  }, [beamDesigns, beamsWithLoads]);
+  }, [beamDesigns, beamsWithLoads, detectedConnections, bobConnections, getBeamReleaseState]);
 
   const currentNodes = modelManager.getAllNodes();
   const currentFrames = modelManager.getAllFrames();
@@ -1715,7 +1742,7 @@ const Index = () => {
                                           <span className="text-amber-600 font-bold">{c.reactionForce.toFixed(1)} kN</span>
                                           <span className="text-muted-foreground">من</span>
                                           <span className="text-blue-600 font-semibold">{c.secondaryBeamIds.join('+')}</span>
-                                          <span className="text-muted-foreground">@ {(c.distanceOnPrimary / 1000).toFixed(2)}م</span>
+                                          <span className="text-muted-foreground">@ {c.distanceOnPrimary.toFixed(2)}م</span>
                                         </span>
                                       ))}
                                     </div>
@@ -1742,13 +1769,33 @@ const Index = () => {
                         <TableBody>
                           {fr.beams.map(b => {
                             const midMoment = b.Mmid;
+                            // Determine hinge status for this beam (same logic as handleAnalysisElementClick)
+                            const bBeam = beamsWithLoads.find(bw => bw.id === b.beamId);
+                            let bHingeLeft = false, bHingeRight = false;
+                            if (bBeam) {
+                              for (const conn of detectedConnections) {
+                                if (conn.secondaryBeamIds.includes(b.beamId)) {
+                                  if (bBeam.fromCol === conn.removedColumnId) bHingeLeft  = true;
+                                  if (bBeam.toCol   === conn.removedColumnId) bHingeRight = true;
+                                }
+                              }
+                              const rs = getBeamReleaseState(bBeam);
+                              if (rs.nodeI.rz) bHingeLeft  = true;
+                              if (rs.nodeJ.rz) bHingeRight = true;
+                            }
+                            const displayMleft  = bHingeLeft  ? 0 : b.Mleft;
+                            const displayMright = bHingeRight ? 0 : b.Mright;
                             return (
                             <TableRow key={b.beamId} className="cursor-pointer hover:bg-accent/10" onClick={() => handleAnalysisElementClick(b.beamId)}>
                               <TableCell className="font-mono text-xs">{b.beamId}</TableCell>
-                              <TableCell className="font-mono text-xs">{b.span.toFixed(1)}</TableCell>
-                              <TableCell className="font-mono text-xs" style={{ color: b.Mleft < 0 ? 'hsl(0 84.2% 60.2%)' : 'hsl(142 71% 45%)' }}>{b.Mleft.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{b.span.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs" style={{ color: displayMleft < 0 ? 'hsl(0 84.2% 60.2%)' : 'hsl(142 71% 45%)' }}>
+                                {bHingeLeft ? <span title="مفصلة — عزم = 0">0.00 ⭕</span> : displayMleft.toFixed(2)}
+                              </TableCell>
                               <TableCell className="font-mono text-xs font-bold" style={{ color: midMoment > 0 ? 'hsl(142 71% 45%)' : 'hsl(0 84.2% 60.2%)' }}>{midMoment.toFixed(2)}</TableCell>
-                              <TableCell className="font-mono text-xs" style={{ color: b.Mright < 0 ? 'hsl(0 84.2% 60.2%)' : 'hsl(142 71% 45%)' }}>{b.Mright.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs" style={{ color: displayMright < 0 ? 'hsl(0 84.2% 60.2%)' : 'hsl(142 71% 45%)' }}>
+                                {bHingeRight ? <span title="مفصلة — عزم = 0">0.00 ⭕</span> : displayMright.toFixed(2)}
+                              </TableCell>
                               <TableCell className="font-mono text-xs">{b.Vu.toFixed(2)}</TableCell>
                               <TableCell><Badge variant="outline" className="text-[10px] cursor-pointer">رسومات</Badge></TableCell>
                             </TableRow>

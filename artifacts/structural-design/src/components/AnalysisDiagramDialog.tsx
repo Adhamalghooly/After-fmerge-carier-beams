@@ -29,6 +29,12 @@ interface DiagramData {
   MyBot?: number;
   Pu?: number;
   colLength?: number;
+  // Hinge flags — moment is released (zero) at this end
+  hingeLeft?: boolean;
+  hingeRight?: boolean;
+  // Carrier-beam point load (produces kink in moment diagram)
+  pointLoadP?: number;  // kN
+  pointLoadA?: number;  // m from left end of beam
 }
 
 interface AnalysisDiagramDialogProps {
@@ -104,9 +110,6 @@ function ColumnDiagramCanvas({ type, data, width = 500, height = 250 }: {
     return `${i === 0 ? 'M' : 'L'} ${px} ${py}`;
   }).join(' ');
 
-  const fillPath = `M ${midX} ${toY(L)} ${points.map(p => `L ${midX + p.M * scl} ${toY(L - p.y)}`).join(' ')} L ${midX} ${toY(0)} Z`;
-
-  // Separate positive and negative fills
   const posFill = `M ${midX} ${toY(L)} ${points.map(p => `L ${midX + Math.max(0, p.M) * scl} ${toY(L - p.y)}`).join(' ')} L ${midX} ${toY(0)} Z`;
   const negFill = `M ${midX} ${toY(L)} ${points.map(p => `L ${midX + Math.min(0, p.M) * scl} ${toY(L - p.y)}`).join(' ')} L ${midX} ${toY(0)} Z`;
 
@@ -164,21 +167,39 @@ function DiagramCanvas({ type, data, width = 500, height = 180 }: {
   const L = data.span || 5;
   const toX = (pos: number) => padX + (pos / L) * drawW;
 
-  // Generate points for diagrams
-  const nPts = 50;
+  // Effective end moments (clamped to zero at released ends)
+  const Ml = data.hingeLeft ? 0 : (data.Mleft || 0);
+  const Mr = data.hingeRight ? 0 : (data.Mright || 0);
+  const Mm = data.Mmid || 0;
+  const w  = data.wu || 0;
+  const Rl = data.Rleft || 0;
+  const hasPointLoad = data.pointLoadP !== undefined && data.pointLoadA !== undefined;
 
+  /**
+   * Exact beam mechanics formula when a concentrated load P is present.
+   * M(x) = Ml + Rl*x - w*x²/2 - P*(x-a)·H(x-a)
+   * For standard beams uses a Hermite polynomial (normalized t = x/L).
+   */
   const getMomentAt = (x: number) => {
-    const Ml = data.Mleft || 0;
-    const Mm = data.Mmid || 0;
-    const Mr = data.Mright || 0;
+    if (hasPointLoad) {
+      let M = Ml + Rl * x - w * x * x / 2;
+      if (x > data.pointLoadA!) M -= data.pointLoadP! * (x - data.pointLoadA!);
+      return M;
+    }
     const t = x / L;
-    const M0 = Ml;
-    const M05 = Mm;
-    const M1 = Mr;
-    return M0 * (1 - 3 * t + 2 * t * t) + M05 * (4 * t - 4 * t * t) + M1 * (-t + 2 * t * t);
+    return Ml * (1 - 3 * t + 2 * t * t) + Mm * (4 * t - 4 * t * t) + Mr * (-t + 2 * t * t);
   };
 
+  /**
+   * Exact shear formula; uses jump at point load location.
+   * For standard beams uses a linear approximation.
+   */
   const getShearAt = (x: number) => {
+    if (hasPointLoad) {
+      let V = Rl - w * x;
+      if (x >= data.pointLoadA!) V -= data.pointLoadP!;
+      return V;
+    }
     const Vu = data.Vu || 0;
     const t = x / L;
     return Vu * (1 - 2 * t);
@@ -190,45 +211,78 @@ function DiagramCanvas({ type, data, width = 500, height = 180 }: {
     return -dMax * 4 * t * (1 - t);
   };
 
-  let points: { x: number; val: number }[] = [];
-  let maxVal = 1;
-  let label = '';
-  let unit = '';
-  let color = '';
+  // --- Hinge / point-load indicator positions ---
+  const HINGE_R = 5;
+  const posColor = 'hsl(142 71% 45%)';
+  const negColor = 'hsl(0 84.2% 60.2%)';
 
+  // ===================== MOMENT DIAGRAM =====================
   if (type === 'moment') {
-    label = 'العزوم'; unit = 'kN.m'; color = 'hsl(var(--primary))';
-    points = Array.from({ length: nPts + 1 }, (_, i) => {
-      const x = (i / nPts) * L;
-      return { x, val: getMomentAt(x) };
-    });
-    const posColor = 'hsl(142 71% 45%)';
-    const negColor = 'hsl(0 84.2% 60.2%)';
-    
-    maxVal = Math.max(...points.map(p => Math.abs(p.val)), 0.01);
+    // Include the exact kink position in the sample set
+    const nPts = 50;
+    let xSamples = Array.from({ length: nPts + 1 }, (_, i) => (i / nPts) * L);
+    if (hasPointLoad && data.pointLoadA! > 0 && data.pointLoadA! < L) {
+      xSamples = [...xSamples, data.pointLoadA!];
+      xSamples.sort((a, b) => a - b);
+    }
+
+    const points = xSamples.map(x => ({ x, val: getMomentAt(x) }));
+    const maxVal = Math.max(...points.map(p => Math.abs(p.val)), 0.01);
     const scl = (drawH / 2 - 5) / maxVal;
-    
+
     const curvePath = points.map((p, i) => {
       const px = toX(p.x);
       const py = midY - p.val * scl;
       return `${i === 0 ? 'M' : 'L'} ${px} ${py}`;
     }).join(' ');
-    
+
     const posFill = `M ${toX(0)} ${midY} ${points.map(p => `L ${toX(p.x)} ${midY - Math.max(0, p.val) * scl}`).join(' ')} L ${toX(L)} ${midY} Z`;
     const negFill = `M ${toX(0)} ${midY} ${points.map(p => `L ${toX(p.x)} ${midY - Math.min(0, p.val) * scl}`).join(' ')} L ${toX(L)} ${midY} Z`;
-    
+
     const minP = points.reduce((a, b) => a.val < b.val ? a : b);
     const maxP = points.reduce((a, b) => a.val > b.val ? a : b);
-    
+
+    // Support symbols — triangle + hinge circle when released
+    const leftSupport = (
+      <>
+        <polygon points={`${padX},${midY} ${padX - 6},${midY + 10} ${padX + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        {data.hingeLeft && (
+          <>
+            <circle cx={padX} cy={midY} r={HINGE_R} fill="hsl(var(--background))" stroke="hsl(var(--foreground))" strokeWidth="1.5" />
+            <text x={padX} y={midY - HINGE_R - 4} textAnchor="middle" fontSize="8" fill="hsl(var(--muted-foreground))">رز=0</text>
+          </>
+        )}
+      </>
+    );
+    const rightSupport = (
+      <>
+        <polygon points={`${toX(L)},${midY} ${toX(L) - 6},${midY + 10} ${toX(L) + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        {data.hingeRight && (
+          <>
+            <circle cx={toX(L)} cy={midY} r={HINGE_R} fill="hsl(var(--background))" stroke="hsl(var(--foreground))" strokeWidth="1.5" />
+            <text x={toX(L)} y={midY - HINGE_R - 4} textAnchor="middle" fontSize="8" fill="hsl(var(--muted-foreground))">رز=0</text>
+          </>
+        )}
+      </>
+    );
+
     return (
       <svg width={width} height={height} className="bg-card border border-border rounded">
-        <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">{label} ({unit})</text>
+        <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">العزوم (kN·m)</text>
         <line x1={padX} y1={midY} x2={padX + drawW} y2={midY} stroke="hsl(var(--muted-foreground))" strokeWidth="0.5" strokeDasharray="4" />
         <path d={posFill} fill={posColor} opacity="0.15" />
         <path d={negFill} fill={negColor} opacity="0.15" />
         <path d={curvePath} fill="none" stroke="hsl(var(--foreground))" strokeWidth="2" />
-        <polygon points={`${padX},${midY} ${padX - 6},${midY + 10} ${padX + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
-        <polygon points={`${toX(L)},${midY} ${toX(L) - 6},${midY + 10} ${toX(L) + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        {leftSupport}
+        {rightSupport}
+        {/* Point load marker (carrier beam) */}
+        {hasPointLoad && data.pointLoadA! > 0 && data.pointLoadA! < L && (
+          <>
+            <line x1={toX(data.pointLoadA!)} y1={padY} x2={toX(data.pointLoadA!)} y2={midY} stroke="hsl(var(--destructive))" strokeWidth="1" strokeDasharray="3" />
+            <polygon points={`${toX(data.pointLoadA!)},${midY - 2} ${toX(data.pointLoadA!) - 5},${padY + 5} ${toX(data.pointLoadA!) + 5},${padY + 5}`} fill="hsl(var(--destructive))" opacity="0.6" />
+            <text x={toX(data.pointLoadA!)} y={padY - 2} textAnchor="middle" fontSize="9" fill="hsl(var(--destructive))" fontFamily="monospace">P={data.pointLoadP!.toFixed(1)}kN</text>
+          </>
+        )}
         {Math.abs(maxP.val) > 0.01 && (
           <text x={toX(maxP.x)} y={midY - maxP.val * scl - 6} textAnchor="middle" fontSize="10" fontFamily="monospace" fill={maxP.val > 0 ? posColor : negColor}>
             {maxP.val.toFixed(2)}
@@ -239,6 +293,13 @@ function DiagramCanvas({ type, data, width = 500, height = 180 }: {
             {minP.val.toFixed(2)}
           </text>
         )}
+        {/* Hinge end-moment labels (zero) */}
+        {data.hingeLeft && (
+          <text x={padX + 3} y={midY - 8} fontSize="9" fill="hsl(var(--muted-foreground))" fontFamily="monospace">0.00</text>
+        )}
+        {data.hingeRight && (
+          <text x={toX(L) - 3} y={midY - 8} textAnchor="end" fontSize="9" fill="hsl(var(--muted-foreground))" fontFamily="monospace">0.00</text>
+        )}
         <text x={width / 2} y={height - 5} textAnchor="middle" className="fill-muted-foreground" fontSize="10">L = {L.toFixed(2)} م</text>
         <rect x={padX} y={height - 18} width={8} height={8} fill={posColor} opacity="0.5" />
         <text x={padX + 12} y={height - 11} fontSize="8" fill={posColor}>موجب (شد سفلي)</text>
@@ -246,76 +307,141 @@ function DiagramCanvas({ type, data, width = 500, height = 180 }: {
         <text x={padX + 102} y={height - 11} fontSize="8" fill={negColor}>سالب (شد علوي)</text>
       </svg>
     );
-  } else if (type === 'shear') {
-    label = 'قوى القص'; unit = 'kN'; color = 'hsl(var(--destructive))';
-    points = Array.from({ length: nPts + 1 }, (_, i) => {
-      const x = (i / nPts) * L;
-      return { x, val: getShearAt(x) };
-    });
-  } else if (type === 'deflection') {
-    label = 'التشوه'; unit = 'mm'; color = 'hsl(var(--accent))';
-    points = Array.from({ length: nPts + 1 }, (_, i) => {
-      const x = (i / nPts) * L;
-      return { x, val: getDeflectionAt(x) };
-    });
-  } else {
-    label = 'ردود الأفعال'; unit = 'kN'; color = 'hsl(var(--primary))';
-    const Rl = data.Rleft ?? ((data.wu || 0) * L / 2);
-    const Rr = data.Rright ?? ((data.wu || 0) * L / 2);
+  }
+
+  // ===================== SHEAR DIAGRAM =====================
+  if (type === 'shear') {
+    const shearColor = 'hsl(var(--destructive))';
+    const nPts = 50;
+    let xSamples = Array.from({ length: nPts + 1 }, (_, i) => (i / nPts) * L);
+
+    // Add points around the jump discontinuity for a sharp visual step
+    if (hasPointLoad && data.pointLoadA! > 0 && data.pointLoadA! < L) {
+      const eps = L * 0.001;
+      xSamples = [...xSamples, data.pointLoadA! - eps, data.pointLoadA! + eps];
+      xSamples.sort((a, b) => a - b);
+    }
+
+    const points = xSamples.map(x => ({ x, val: getShearAt(x) }));
+    const maxVal = Math.max(...points.map(p => Math.abs(p.val)), 0.01);
+    const scale = (drawH / 2 - 5) / maxVal;
+
+    const pathData = points.map((p, i) => {
+      const px = toX(p.x);
+      const py = midY - p.val * scale;
+      return `${i === 0 ? 'M' : 'L'} ${px} ${py}`;
+    }).join(' ');
+
+    const fillPath = `M ${toX(0)} ${midY} ${points.map(p => `L ${toX(p.x)} ${midY - p.val * scale}`).join(' ')} L ${toX(L)} ${midY} Z`;
+
+    const minP = points.reduce((a, b) => a.val < b.val ? a : b);
+    const maxP = points.reduce((a, b) => a.val > b.val ? a : b);
+
     return (
       <svg width={width} height={height} className="bg-card border border-border rounded">
-        <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">{label} ({unit})</text>
-        <line x1={padX} y1={midY} x2={padX + drawW} y2={midY} stroke="hsl(var(--foreground))" strokeWidth="2" />
-        <line x1={padX} y1={midY + 40} x2={padX} y2={midY + 5} stroke={color} strokeWidth="2" markerEnd="url(#arrow)" />
-        <text x={padX} y={midY + 55} textAnchor="middle" className="fill-foreground" fontSize="11" fontFamily="monospace">{Rl.toFixed(1)}</text>
-        <line x1={padX + drawW} y1={midY + 40} x2={padX + drawW} y2={midY + 5} stroke={color} strokeWidth="2" markerEnd="url(#arrow)" />
-        <text x={padX + drawW} y={midY + 55} textAnchor="middle" className="fill-foreground" fontSize="11" fontFamily="monospace">{Rr.toFixed(1)}</text>
-        <polygon points={`${padX},${midY} ${padX - 8},${midY + 12} ${padX + 8},${midY + 12}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1.5" />
-        <polygon points={`${padX + drawW},${midY} ${padX + drawW - 8},${midY + 12} ${padX + drawW + 8},${midY + 12}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1.5" />
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill={color} />
-          </marker>
-        </defs>
+        <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">قوى القص (kN)</text>
+        <line x1={padX} y1={midY} x2={padX + drawW} y2={midY} stroke="hsl(var(--muted-foreground))" strokeWidth="0.5" strokeDasharray="4" />
+        <path d={fillPath} fill={shearColor} opacity="0.15" />
+        <path d={pathData} fill="none" stroke={shearColor} strokeWidth="2" />
+        <polygon points={`${padX},${midY} ${padX - 6},${midY + 10} ${padX + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        <polygon points={`${toX(L)},${midY} ${toX(L) - 6},${midY + 10} ${toX(L) + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        {/* Point load jump marker */}
+        {hasPointLoad && data.pointLoadA! > 0 && data.pointLoadA! < L && (
+          <line x1={toX(data.pointLoadA!)} y1={padY} x2={toX(data.pointLoadA!)} y2={padY + drawH} stroke="hsl(var(--destructive))" strokeWidth="0.8" strokeDasharray="3" opacity="0.5" />
+        )}
+        {Math.abs(maxP.val) > 0.01 && (
+          <text x={toX(maxP.x)} y={midY - maxP.val * scale - 6} textAnchor="middle" className="fill-foreground" fontSize="10" fontFamily="monospace">
+            {maxP.val.toFixed(2)}
+          </text>
+        )}
+        {Math.abs(minP.val) > 0.01 && minP !== maxP && (
+          <text x={toX(minP.x)} y={midY - minP.val * scale + 14} textAnchor="middle" className="fill-foreground" fontSize="10" fontFamily="monospace">
+            {minP.val.toFixed(2)}
+          </text>
+        )}
+        <text x={padX + drawW / 2} y={height - 5} textAnchor="middle" className="fill-muted-foreground" fontSize="10">
+          L = {L.toFixed(2)} م
+        </text>
       </svg>
     );
   }
 
-  maxVal = Math.max(...points.map(p => Math.abs(p.val)), 0.01);
-  const scale = (drawH / 2 - 5) / maxVal;
+  // ===================== DEFLECTION DIAGRAM =====================
+  if (type === 'deflection') {
+    const deflColor = 'hsl(var(--accent))';
+    const nPts = 50;
+    const points = Array.from({ length: nPts + 1 }, (_, i) => {
+      const x = (i / nPts) * L;
+      return { x, val: getDeflectionAt(x) };
+    });
+    const maxVal = Math.max(...points.map(p => Math.abs(p.val)), 0.01);
+    const scale = (drawH / 2 - 5) / maxVal;
 
-  const pathData = points.map((p, i) => {
-    const px = toX(p.x);
-    const py = midY - p.val * scale;
-    return `${i === 0 ? 'M' : 'L'} ${px} ${py}`;
-  }).join(' ');
+    const pathData = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${toX(p.x)} ${midY - p.val * scale}`).join(' ');
+    const fillPath = `M ${toX(0)} ${midY} ${points.map(p => `L ${toX(p.x)} ${midY - p.val * scale}`).join(' ')} L ${toX(L)} ${midY} Z`;
+    const minP = points.reduce((a, b) => a.val < b.val ? a : b);
 
-  const fillPath = `M ${toX(0)} ${midY} ${points.map(p => `L ${toX(p.x)} ${midY - p.val * scale}`).join(' ')} L ${toX(L)} ${midY} Z`;
+    return (
+      <svg width={width} height={height} className="bg-card border border-border rounded">
+        <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">التشوه (mm)</text>
+        <line x1={padX} y1={midY} x2={padX + drawW} y2={midY} stroke="hsl(var(--muted-foreground))" strokeWidth="0.5" strokeDasharray="4" />
+        <path d={fillPath} fill={deflColor} opacity="0.15" />
+        <path d={pathData} fill="none" stroke={deflColor} strokeWidth="2" />
+        <polygon points={`${padX},${midY} ${padX - 6},${midY + 10} ${padX + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        <polygon points={`${toX(L)},${midY} ${toX(L) - 6},${midY + 10} ${toX(L) + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
+        {Math.abs(minP.val) > 0.01 && (
+          <text x={toX(minP.x)} y={midY - minP.val * scale + 14} textAnchor="middle" className="fill-foreground" fontSize="10" fontFamily="monospace">
+            {Math.abs(minP.val).toFixed(2)} mm
+          </text>
+        )}
+        <text x={padX + drawW / 2} y={height - 5} textAnchor="middle" className="fill-muted-foreground" fontSize="10">
+          L = {L.toFixed(2)} م
+        </text>
+      </svg>
+    );
+  }
 
-  const minP = points.reduce((a, b) => a.val < b.val ? a : b);
-  const maxP = points.reduce((a, b) => a.val > b.val ? a : b);
+  // ===================== REACTIONS DIAGRAM =====================
+  const reactionColor = 'hsl(var(--primary))';
+  const Rl2 = data.Rleft ?? (w * L / 2 + (hasPointLoad ? data.pointLoadP! * (L - data.pointLoadA!) / L : 0));
+  const Rr2 = data.Rright ?? (w * L / 2 + (hasPointLoad ? data.pointLoadP! * data.pointLoadA! / L : 0));
 
   return (
     <svg width={width} height={height} className="bg-card border border-border rounded">
-      <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">{label} ({unit})</text>
-      <line x1={padX} y1={midY} x2={padX + drawW} y2={midY} stroke="hsl(var(--muted-foreground))" strokeWidth="0.5" strokeDasharray="4" />
-      <path d={fillPath} fill={color} opacity="0.15" />
-      <path d={pathData} fill="none" stroke={color} strokeWidth="2" />
-      <polygon points={`${padX},${midY} ${padX - 6},${midY + 10} ${padX + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
-      <polygon points={`${toX(L)},${midY} ${toX(L) - 6},${midY + 10} ${toX(L) + 6},${midY + 10}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1" />
-      {Math.abs(maxP.val) > 0.01 && (
-        <text x={toX(maxP.x)} y={midY - maxP.val * scale - 6} textAnchor="middle" className="fill-foreground" fontSize="10" fontFamily="monospace">
-          {maxP.val.toFixed(2)}
-        </text>
+      <text x={width / 2} y={16} textAnchor="middle" className="fill-foreground text-xs font-semibold">ردود الأفعال (kN)</text>
+      <line x1={padX} y1={midY} x2={padX + drawW} y2={midY} stroke="hsl(var(--foreground))" strokeWidth="2" />
+      {/* Distributed load arrows */}
+      {w > 0 && Array.from({ length: 8 }, (_, i) => {
+        const ax = padX + (i / 7) * drawW;
+        return <line key={i} x1={ax} y1={padY} x2={ax} y2={midY - 15} stroke="hsl(var(--muted-foreground))" strokeWidth="1" markerEnd="url(#arrowDn)" opacity="0.5" />;
+      })}
+      {w > 0 && <line x1={padX} y1={padY} x2={padX + drawW} y2={padY} stroke="hsl(var(--muted-foreground))" strokeWidth="1" />}
+      {w > 0 && <text x={width / 2} y={padY - 4} textAnchor="middle" fontSize="9" fill="hsl(var(--muted-foreground))" fontFamily="monospace">w={w.toFixed(1)} kN/m</text>}
+      {/* Point load arrow */}
+      {hasPointLoad && data.pointLoadA! >= 0 && data.pointLoadA! <= L && (
+        <>
+          <line x1={toX(data.pointLoadA!)} y1={padY} x2={toX(data.pointLoadA!)} y2={midY - 5} stroke="hsl(var(--destructive))" strokeWidth="2" markerEnd="url(#arrowDn)" />
+          <text x={toX(data.pointLoadA!)} y={padY - 3} textAnchor="middle" fontSize="9" fill="hsl(var(--destructive))" fontFamily="monospace">P={data.pointLoadP!.toFixed(1)}</text>
+        </>
       )}
-      {Math.abs(minP.val) > 0.01 && minP !== maxP && (
-        <text x={toX(minP.x)} y={midY - minP.val * scale + 14} textAnchor="middle" className="fill-foreground" fontSize="10" fontFamily="monospace">
-          {minP.val.toFixed(2)}
-        </text>
-      )}
-      <text x={padX + drawW / 2} y={height - 5} textAnchor="middle" className="fill-muted-foreground" fontSize="10">
-        L = {L.toFixed(2)} م
-      </text>
+      {/* Left reaction */}
+      <line x1={padX} y1={midY + 40} x2={padX} y2={midY + 5} stroke={reactionColor} strokeWidth="2" markerEnd="url(#arrow)" />
+      <text x={padX} y={midY + 55} textAnchor="middle" className="fill-foreground" fontSize="11" fontFamily="monospace">{Rl2.toFixed(1)}</text>
+      {/* Right reaction */}
+      <line x1={padX + drawW} y1={midY + 40} x2={padX + drawW} y2={midY + 5} stroke={reactionColor} strokeWidth="2" markerEnd="url(#arrow)" />
+      <text x={padX + drawW} y={midY + 55} textAnchor="middle" className="fill-foreground" fontSize="11" fontFamily="monospace">{Rr2.toFixed(1)}</text>
+      {/* Support triangles */}
+      <polygon points={`${padX},${midY} ${padX - 8},${midY + 12} ${padX + 8},${midY + 12}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1.5" />
+      <polygon points={`${padX + drawW},${midY} ${padX + drawW - 8},${midY + 12} ${padX + drawW + 8},${midY + 12}`} fill="none" stroke="hsl(var(--foreground))" strokeWidth="1.5" />
+      <text x={padX + drawW / 2} y={height - 5} textAnchor="middle" className="fill-muted-foreground" fontSize="10">L = {L.toFixed(2)} م</text>
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill={reactionColor} />
+        </marker>
+        <marker id="arrowDn" viewBox="0 0 10 10" refX="5" refY="10" markerWidth="4" markerHeight="4" orient="auto">
+          <path d="M 0 0 L 10 0 L 5 10 z" fill="hsl(var(--muted-foreground))" />
+        </marker>
+      </defs>
     </svg>
   );
 }
@@ -348,13 +474,20 @@ export default function AnalysisDiagramDialog({ open, onClose, data }: AnalysisD
   const filteredColTypes = activeFilter === 'all' ? colTypes : colTypes.filter(t => t === activeFilter);
   const filteredBeamTypes = activeFilter === 'all' ? beamTypes : beamTypes.filter(t => t === activeFilter);
 
+  const badgeParts = [`L=${data.span?.toFixed(2)}م`];
+  if (data.hingeLeft) badgeParts.push('دوران يسار');
+  if (data.hingeRight) badgeParts.push('دوران يمين');
+  if (data.pointLoadP) badgeParts.push(`P=${data.pointLoadP.toFixed(1)}kN`);
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="text-base flex items-center gap-2">
+          <DialogTitle className="text-base flex items-center gap-2 flex-wrap">
             رسومات التحليل - {data.elementId}
-            <Badge variant="outline" className="text-[10px]">L={data.span?.toFixed(2)}م</Badge>
+            {badgeParts.map((bp, i) => (
+              <Badge key={i} variant="outline" className="text-[10px]">{bp}</Badge>
+            ))}
           </DialogTitle>
           <DialogDescription className="text-xs">
             {isColumn ? 'عرض رسومات العزوم والحمل المحوري للعمود' : 'عرض رسومات العزوم والقص والتشوه وردود الأفعال'}
