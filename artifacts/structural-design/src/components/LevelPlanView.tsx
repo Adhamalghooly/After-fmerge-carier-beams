@@ -28,6 +28,7 @@ interface LevelPlanViewProps {
   onSupportRestraintsChange?: (posKeys: string[], restraints: SupportRestraints) => void;
   supportRestraints?: Record<string, SupportRestraints>;
   onElementLongPress?: (type: 'beam' | 'column' | 'slab', id: string) => void;
+  onDeleteElement?: (type: 'beam' | 'column' | 'slab', id: string) => void;
 }
 
 interface SelectedElement {
@@ -68,7 +69,7 @@ interface SupportDialogState {
 }
 
 export default function LevelPlanView({
-  columns, beams, slabs, stories, selectedElevation, onColumnSupportChange, onSupportRestraintsChange, supportRestraints, onElementLongPress,
+  columns, beams, slabs, stories, selectedElevation, onColumnSupportChange, onSupportRestraintsChange, supportRestraints, onElementLongPress, onDeleteElement,
 }: LevelPlanViewProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [viewBox, setViewBox] = useState({ x: -2, y: -2, w: 16, h: 18 });
@@ -86,6 +87,7 @@ export default function LevelPlanView({
     restraints: { ux: true, uy: true, uz: true, rx: true, ry: true, rz: true },
     applyToAll: false,
   });
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const isGroundLevel = selectedElevation <= 1;
   const tolerance = 100;
@@ -350,7 +352,25 @@ export default function LevelPlanView({
     if (editDialog.type && onElementLongPress) {
       onElementLongPress(editDialog.type as 'beam' | 'column' | 'slab', editDialog.id);
     }
+    setConfirmDelete(false);
     setEditDialog(prev => ({ ...prev, open: false }));
+  };
+
+  const handleDeleteClick = () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    if (editDialog.type && onDeleteElement) {
+      onDeleteElement(editDialog.type as 'beam' | 'column' | 'slab', editDialog.id);
+    }
+    setConfirmDelete(false);
+    setEditDialog(prev => ({ ...prev, open: false }));
+  };
+
+  const handleEditDialogClose = (open: boolean) => {
+    if (!open) setConfirmDelete(false);
+    setEditDialog(prev => ({ ...prev, open }));
   };
 
   // Compute grid line scale
@@ -665,7 +685,7 @@ export default function LevelPlanView({
       )}
 
       {/* Element properties dialog */}
-      <Dialog open={editDialog.open} onOpenChange={open => setEditDialog(prev => ({ ...prev, open }))}>
+      <Dialog open={editDialog.open} onOpenChange={handleEditDialogClose}>
         <DialogContent className="max-w-sm" dir="rtl">
           <DialogHeader>
             <DialogTitle>
@@ -793,13 +813,33 @@ export default function LevelPlanView({
             )}
           </div>
 
-          <DialogFooter className="gap-2">
-            <Button variant="outline" size="sm" onClick={() => setEditDialog(prev => ({ ...prev, open: false }))}>
-              إلغاء
-            </Button>
-            <Button size="sm" onClick={handleEditSave}>
-              حفظ التغييرات
-            </Button>
+          {confirmDelete && (
+            <div className="bg-destructive/10 border border-destructive/40 rounded-lg p-3 mx-0 mb-2">
+              <p className="text-sm text-destructive font-medium text-center">
+                ⚠️ هل أنت متأكد من حذف {editDialog.type === 'beam' ? 'الجسر' : editDialog.type === 'column' ? 'العمود' : 'البلاطة'} {editDialog.label}؟
+              </p>
+              <p className="text-xs text-muted-foreground text-center mt-1">اضغط زر الحذف مرة أخرى للتأكيد</p>
+            </div>
+          )}
+          <DialogFooter className="flex-col gap-2">
+            {onDeleteElement && (
+              <Button
+                variant={confirmDelete ? 'destructive' : 'outline'}
+                size="sm"
+                className={`w-full min-h-[44px] ${confirmDelete ? '' : 'border-destructive/50 text-destructive hover:bg-destructive/10'}`}
+                onClick={handleDeleteClick}
+              >
+                {confirmDelete ? '⚠️ تأكيد الحذف' : '🗑️ حذف العنصر'}
+              </Button>
+            )}
+            <div className="flex gap-2 w-full">
+              <Button variant="outline" size="sm" className="flex-1 min-h-[40px]" onClick={() => { setConfirmDelete(false); setEditDialog(prev => ({ ...prev, open: false })); }}>
+                إلغاء
+              </Button>
+              <Button size="sm" className="flex-1 min-h-[40px]" onClick={handleEditSave}>
+                حفظ التغييرات
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -761,6 +761,30 @@ const Index = () => {
     dispatch({ type: 'RESET_ANALYSIS' });
   }, []);
 
+  const handleLevelElementDelete = useCallback((type: 'beam' | 'column' | 'slab', id: string) => {
+    if (type === 'beam') {
+      const isExtra = extraBeams.some(eb => eb.id === id);
+      if (isExtra) {
+        dispatch({ type: 'REMOVE_EXTRA_BEAM', id });
+      } else if (!removedBeamIds.includes(id)) {
+        dispatch({ type: 'TOGGLE_BEAM_REMOVAL', beamId: id });
+      }
+    } else if (type === 'column') {
+      const isExtra = extraColumns.some(ec => ec.id === id);
+      if (isExtra) {
+        dispatch({ type: 'REMOVE_EXTRA_COLUMN', id });
+      } else if (!removedColumnIds.includes(id)) {
+        dispatch({ type: 'TOGGLE_COLUMN_REMOVAL', colId: id });
+      }
+    } else if (type === 'slab') {
+      const idx = slabs.findIndex(s => s.id === id);
+      if (idx !== -1) {
+        dispatch({ type: 'REMOVE_SLAB', index: idx });
+      }
+    }
+    dispatch({ type: 'RESET_ANALYSIS' });
+  }, [extraBeams, extraColumns, slabs, removedBeamIds, removedColumnIds]);
+
   const handleElemPropsDelete = useCallback((data: { frameId?: number; areaId?: number }) => {
     if (data.frameId != null) {
       modelManager.deleteElement(data.frameId);
@@ -1103,6 +1127,7 @@ const Index = () => {
                     onSupportRestraintsChange={handleSupportRestraintsChange}
                     supportRestraints={supportRestraints}
                     onElementLongPress={handleLevelElementLongPress}
+                    onDeleteElement={handleLevelElementDelete}
                   />
                 </div>
               ) : (

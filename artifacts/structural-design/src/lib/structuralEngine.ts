@@ -713,18 +713,29 @@ export function detectBeamOnBeam(
 
     if (hBeams.length === 0 || vBeams.length === 0) continue;
 
-    // Use max EI/L stiffness to classify direction (not total span length)
-    // This matches ETABS approach: stiffer beam carries the other
-    const hStiffness = hBeams.reduce((maxS, b) => {
-      const I = (b.b / 1000) * Math.pow(b.h / 1000, 3) / 12;
-      return Math.max(maxS, I / b.length);
-    }, 0);
-    const vStiffness = vBeams.reduce((maxS, b) => {
-      const I = (b.b / 1000) * Math.pow(b.h / 1000, 3) / 12;
-      return Math.max(maxS, I / b.length);
-    }, 0);
-
-    const primaryIsHorizontal = hStiffness >= vStiffness;
+    // --- Rule: If two collinear beams (same direction) meet one perpendicular beam ---
+    // The collinear pair is ALWAYS primary (they form one continuous beam split for analysis)
+    // The single perpendicular beam is ALWAYS secondary (carried/محمول)
+    // This overrides the stiffness comparison because continuity governs.
+    let primaryIsHorizontal: boolean;
+    if (hBeams.length >= 2 && vBeams.length === 1) {
+      // Two horizontal (collinear) + one vertical: horizontal is primary
+      primaryIsHorizontal = true;
+    } else if (vBeams.length >= 2 && hBeams.length === 1) {
+      // Two vertical (collinear) + one horizontal: vertical is primary
+      primaryIsHorizontal = false;
+    } else {
+      // Equal counts or other configs: use EI/L stiffness comparison (ETABS approach)
+      const hStiffness = hBeams.reduce((maxS, b) => {
+        const I = (b.b / 1000) * Math.pow(b.h / 1000, 3) / 12;
+        return Math.max(maxS, I / b.length);
+      }, 0);
+      const vStiffness = vBeams.reduce((maxS, b) => {
+        const I = (b.b / 1000) * Math.pow(b.h / 1000, 3) / 12;
+        return Math.max(maxS, I / b.length);
+      }, 0);
+      primaryIsHorizontal = hStiffness >= vStiffness;
+    }
     const primaryBeams = primaryIsHorizontal ? hBeams : vBeams;
     const secondaryBeams = primaryIsHorizontal ? vBeams : hBeams;
 
