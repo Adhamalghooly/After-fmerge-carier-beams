@@ -109,6 +109,9 @@ const Index = () => {
   const [releaseEditorBeamId, setReleaseEditorBeamId] = React.useState<string | null>(null);
   const [releaseEditorData, setReleaseEditorData] = React.useState<BeamEndReleaseState>(createEmptyBeamEndReleases);
 
+  // Duplicate check state
+  const [dupCheckResult, setDupCheckResult] = React.useState<{ message: string; count: number; items: string[] } | null>(null);
+
   // Modeler elevation filter state
   const [modelerElevation, setModelerElevation] = React.useState<number>(0);
 
@@ -757,6 +760,126 @@ const Index = () => {
     dispatch({ type: 'INC_MODEL_VERSION' });
     dispatch({ type: 'RESET_ANALYSIS' });
   }, []);
+
+  const handleElemPropsDelete = useCallback((data: { frameId?: number; areaId?: number }) => {
+    if (data.frameId != null) {
+      modelManager.deleteElement(data.frameId);
+    }
+    if (data.areaId != null) {
+      modelManager.deleteArea(data.areaId);
+    }
+    dispatch({ type: 'CLOSE_ELEM_PROPS' });
+    dispatch({ type: 'INC_MODEL_VERSION' });
+    dispatch({ type: 'RESET_ANALYSIS' });
+  }, []);
+
+  const checkAndRemoveDuplicates = useCallback(() => {
+    const EPS = 0.011;
+    const items: string[] = [];
+
+    const getNum = (id: string) => parseInt(id.replace(/\D/g, '') || '0', 10);
+
+    // ---- فحص البلاطات المكررة ----
+    const slabGroups = new Map<string, typeof slabs>();
+    for (const s of slabs) {
+      const x1 = Math.min(s.x1, s.x2), y1 = Math.min(s.y1, s.y2);
+      const x2 = Math.max(s.x1, s.x2), y2 = Math.max(s.y1, s.y2);
+      const key = `${s.storyId || ''}|${x1.toFixed(2)},${y1.toFixed(2)},${x2.toFixed(2)},${y2.toFixed(2)}`;
+      if (!slabGroups.has(key)) slabGroups.set(key, []);
+      slabGroups.get(key)!.push(s);
+    }
+    const slabIndicesToRemove: number[] = [];
+    for (const [, group] of slabGroups) {
+      if (group.length > 1) {
+        const sorted = [...group].sort((a, b) => getNum(a.id) - getNum(b.id));
+        const toRemove = sorted.slice(0, -1);
+        for (const s of toRemove) {
+          const idx = slabs.indexOf(s);
+          if (idx !== -1) slabIndicesToRemove.push(idx);
+          items.push(`بلاطة ${s.id} (مكررة مع ${sorted[sorted.length - 1].id})`);
+        }
+      }
+    }
+    const sortedSlabIndices = [...slabIndicesToRemove].sort((a, b) => b - a);
+    for (const idx of sortedSlabIndices) {
+      dispatch({ type: 'REMOVE_SLAB', index: idx });
+    }
+
+    // ---- فحص الجسور المكررة ----
+    const beamGroups = new Map<string, typeof beamsWithLoads>();
+    for (const b of beamsWithLoads) {
+      const x1 = Math.min(b.x1, b.x2), y1 = Math.min(b.y1, b.y2);
+      const x2 = Math.max(b.x1, b.x2), y2 = Math.max(b.y1, b.y2);
+      const key = `${b.storyId || ''}|${x1.toFixed(2)},${y1.toFixed(2)},${x2.toFixed(2)},${y2.toFixed(2)}`;
+      if (!beamGroups.has(key)) beamGroups.set(key, []);
+      beamGroups.get(key)!.push(b);
+    }
+    for (const [, group] of beamGroups) {
+      if (group.length > 1) {
+        const sorted = [...group].sort((a, b) => getNum(a.id) - getNum(b.id));
+        const toRemove = sorted.slice(0, -1);
+        for (const b of toRemove) {
+          const isExtra = extraBeams.some(eb => eb.id === b.id);
+          if (isExtra) {
+            dispatch({ type: 'REMOVE_EXTRA_BEAM', id: b.id });
+          } else if (!removedBeamIds.includes(b.id)) {
+            dispatch({ type: 'TOGGLE_BEAM_REMOVAL', beamId: b.id });
+          }
+          items.push(`جسر ${b.id} (مكرر مع ${sorted[sorted.length - 1].id})`);
+        }
+      }
+    }
+
+    // ---- فحص الأعمدة المكررة ----
+    const colGroups = new Map<string, typeof columns>();
+    for (const c of columns.filter(c2 => !c2.isRemoved)) {
+      const key = `${c.storyId || ''}|${c.x.toFixed(2)},${c.y.toFixed(2)}`;
+      if (!colGroups.has(key)) colGroups.set(key, []);
+      colGroups.get(key)!.push(c);
+    }
+    for (const [, group] of colGroups) {
+      if (group.length > 1) {
+        const sorted = [...group].sort((a, b) => getNum(a.id) - getNum(b.id));
+        const toRemove = sorted.slice(0, -1);
+        for (const c of toRemove) {
+          const isExtra = extraColumns.some(ec => ec.id === c.id);
+          if (isExtra) {
+            dispatch({ type: 'REMOVE_EXTRA_COLUMN', id: c.id });
+          } else if (!removedColumnIds.includes(c.id)) {
+            dispatch({ type: 'TOGGLE_COLUMN_REMOVAL', colId: c.id });
+          }
+          items.push(`عمود ${c.id} (مكرر مع ${sorted[sorted.length - 1].id})`);
+        }
+      }
+    }
+
+    // ---- فحص النقاط المكررة في ModelManager ----
+    const allNodes = modelManager.getAllNodes();
+    const nodeDups: number[] = [];
+    for (let i = 0; i < allNodes.length; i++) {
+      for (let j = i + 1; j < allNodes.length; j++) {
+        const ni = allNodes[i], nj = allNodes[j];
+        const dist = Math.sqrt((ni.x - nj.x) ** 2 + (ni.y - nj.y) ** 2 + (ni.z - nj.z) ** 2);
+        if (dist < EPS && !nodeDups.includes(ni.id)) {
+          nodeDups.push(ni.id);
+          items.push(`نقطة N${ni.id} مكررة مع N${nj.id}`);
+        }
+      }
+    }
+    for (const nid of nodeDups) {
+      modelManager.deleteNode(nid);
+    }
+    if (nodeDups.length > 0) dispatch({ type: 'INC_MODEL_VERSION' });
+
+    const count = items.length;
+    if (count === 0) {
+      setDupCheckResult({ message: '✅ لا توجد عناصر مكررة في النموذج', count: 0, items: [] });
+    } else {
+      dispatch({ type: 'RESET_ANALYSIS' });
+      dispatch({ type: 'INC_MODEL_VERSION' });
+      setDupCheckResult({ message: `تم حذف ${count} عنصر مكرر بنجاح`, count, items });
+    }
+  }, [slabs, beamsWithLoads, columns, extraBeams, extraColumns, removedBeamIds, removedColumnIds]);
 
   const handleAnalysisElementClick = useCallback((beamId: string) => {
     const design = beamDesigns.find(d => d.beamId === beamId);
@@ -1456,6 +1579,41 @@ const Index = () => {
 
           {/* ANALYSIS TAB */}
           <TabsContent value="analysis" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+            {/* Duplicate Check Card - always visible */}
+            <Card className="mb-3 border-orange-200 dark:border-orange-800">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Search size={14} className="text-orange-500" />
+                  فحص تكرار العناصر
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-xs text-muted-foreground">
+                  يفحص هذا الأداء وجود جسور أو أعمدة أو بلاطات أو نقاط متكررة (نفس الإحداثيات)، ويحذف العنصر الأقدم تسمية تلقائياً ويُبقي الأحدث.
+                </p>
+                {dupCheckResult && (
+                  <div className={`rounded-lg p-3 text-xs space-y-1 ${dupCheckResult.count === 0 ? 'bg-green-500/10 border border-green-500/30 text-green-700 dark:text-green-400' : 'bg-orange-500/10 border border-orange-500/30 text-orange-800 dark:text-orange-300'}`}>
+                    <p className="font-semibold">{dupCheckResult.message}</p>
+                    {dupCheckResult.items.length > 0 && (
+                      <ul className="mt-1 space-y-0.5 list-disc list-inside text-[11px] text-muted-foreground">
+                        {dupCheckResult.items.map((item, i) => (
+                          <li key={i}>{item}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                <Button
+                  onClick={checkAndRemoveDuplicates}
+                  variant="outline"
+                  className="w-full min-h-[44px] border-orange-300 text-orange-700 hover:bg-orange-50 dark:text-orange-400 dark:border-orange-700 dark:hover:bg-orange-950"
+                >
+                  <Search size={14} className="mr-2" />
+                  فحص التكرارات وحذفها
+                </Button>
+              </CardContent>
+            </Card>
+
             {!analyzed ? (
               <Card><CardContent className="py-12 text-center">
                 <p className="text-muted-foreground mb-4">يرجى تشغيل التحليل أولاً</p>
@@ -2189,6 +2347,7 @@ const Index = () => {
         nodeJ={elemPropsFrameId != null ? (() => { const f = currentFrames.find(fr => fr.id === elemPropsFrameId); return f ? currentNodes.find(n => n.id === f.nodeJ) : null; })() : null}
         slabProps={elemPropsAreaId != null ? { ...slabProps, ...(slabPropsOverrides[elemPropsAreaId] || {}) } : null}
         onSave={handleElemPropsSave}
+        onDelete={handleElemPropsDelete}
       />
 
       {/* Analysis Diagram Dialog */}

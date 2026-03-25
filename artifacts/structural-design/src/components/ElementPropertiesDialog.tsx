@@ -40,10 +40,11 @@ interface ElementPropertiesDialogProps {
     nodeIRestraints?: EndRelease;
     nodeJRestraints?: EndRelease;
   }) => void;
+  onDelete?: (data: { frameId?: number; areaId?: number }) => void;
 }
 
 export default function ElementPropertiesDialog({
-  open, onClose, frame, area, nodeI, nodeJ, slabProps, onSave
+  open, onClose, frame, area, nodeI, nodeJ, slabProps, onSave, onDelete
 }: ElementPropertiesDialogProps) {
   const [b, setB] = useState(0);
   const [h, setH] = useState(0);
@@ -53,8 +54,10 @@ export default function ElementPropertiesDialog({
   const [cover, setCover] = useState(0);
   const [releaseI, setReleaseI] = useState<EndRelease>({ ux: false, uy: false, uz: false, rx: false, ry: false, rz: false });
   const [releaseJ, setReleaseJ] = useState<EndRelease>({ ux: false, uy: false, uz: false, rx: false, ry: false, rz: false });
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
+    setConfirmDelete(false);
     if (frame) {
       setB(frame.b || 200);
       setH(frame.h || 400);
@@ -86,6 +89,23 @@ export default function ElementPropertiesDialog({
     onClose();
   };
 
+  const handleDelete = () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    if (onDelete) {
+      if (frame) onDelete({ frameId: frame.id });
+      else if (area) onDelete({ areaId: area.id });
+    }
+    onClose();
+  };
+
+  const handleClose = () => {
+    setConfirmDelete(false);
+    onClose();
+  };
+
   const isBeam = frame?.type === 'beam';
   const isColumn = frame?.type === 'column';
   const isArea = !!area;
@@ -93,6 +113,8 @@ export default function ElementPropertiesDialog({
   const title = isBeam ? `خصائص الجسر B${frame?.id}` :
     isColumn ? `خصائص العمود C${frame?.id}` :
     isArea ? `خصائص البلاطة A${area?.id}` : 'خصائص العنصر';
+
+  const elementTypeLabel = isBeam ? 'الجسر' : isColumn ? 'العمود' : 'البلاطة';
 
   const ReleaseToggle = ({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) => (
     <div className="flex items-center justify-between gap-2">
@@ -102,7 +124,7 @@ export default function ElementPropertiesDialog({
   );
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
       <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-base">{title}</DialogTitle>
@@ -254,11 +276,35 @@ export default function ElementPropertiesDialog({
               </div>
             );
           })()}
+
+          {/* Delete confirmation message */}
+          {confirmDelete && (
+            <div className="bg-destructive/10 border border-destructive/40 rounded-lg p-3">
+              <p className="text-sm text-destructive font-medium text-center">
+                ⚠️ هل أنت متأكد من حذف {elementTypeLabel}؟
+              </p>
+              <p className="text-xs text-muted-foreground text-center mt-1">
+                اضغط "حذف العنصر" مرة أخرى للتأكيد
+              </p>
+            </div>
+          )}
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
-          <Button onClick={handleSave} className="min-h-[44px]">حفظ التغييرات</Button>
+        <DialogFooter className="flex-col gap-2 sm:flex-row sm:gap-0">
+          {/* Delete button - shown when onDelete is provided */}
+          {onDelete && (
+            <Button
+              variant={confirmDelete ? "destructive" : "outline"}
+              onClick={handleDelete}
+              className={`min-h-[44px] sm:mr-auto border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground ${confirmDelete ? '' : 'hover:border-destructive'}`}
+            >
+              {confirmDelete ? '⚠️ تأكيد الحذف' : '🗑️ حذف العنصر'}
+            </Button>
+          )}
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleClose} className="min-h-[44px]">إلغاء</Button>
+            <Button onClick={handleSave} className="min-h-[44px]">حفظ التغييرات</Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
