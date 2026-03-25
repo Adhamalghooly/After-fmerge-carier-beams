@@ -1662,22 +1662,41 @@ const Index = () => {
                   <CardContent className="overflow-x-auto">
                     <Table>
                       <TableHeader><TableRow>
-                        {['الدور','الجسر','DL','LL','1.4D','1.2D+1.6L','البلاطات'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
+                        {['الدور','الجسر','DL','LL','1.4D','1.2D+1.6L','البلاطات','أحمال مركزة من جسور (kN)'].map(h => <TableHead key={h} className="text-xs">{h}</TableHead>)}
                       </TableRow></TableHeader>
                       <TableBody>
                         {stories.map(story => 
                           (isAllStories || story.id === selectedStoryId) &&
-                          beamsWithLoads.filter(b => b.storyId === story.id).map(b => (
-                            <TableRow key={`${story.id}-${b.id}`}>
-                              <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
-                              <TableCell className="font-mono text-xs">{b.id}</TableCell>
-                              <TableCell className="font-mono text-xs">{b.deadLoad.toFixed(2)}</TableCell>
-                              <TableCell className="font-mono text-xs">{b.liveLoad.toFixed(2)}</TableCell>
-                              <TableCell className="font-mono text-xs">{(1.4 * b.deadLoad).toFixed(2)}</TableCell>
-                              <TableCell className="font-mono text-xs">{(1.2 * b.deadLoad + 1.6 * b.liveLoad).toFixed(2)}</TableCell>
-                              <TableCell className="text-xs">{b.slabs.join(', ')}</TableCell>
-                            </TableRow>
-                          ))
+                          beamsWithLoads.filter(b => b.storyId === story.id).map(b => {
+                            const pointLoads = bobConnections.filter(c => c.primaryBeamId === b.id);
+                            return (
+                              <TableRow key={`${story.id}-${b.id}`}>
+                                <TableCell className="text-xs font-medium text-muted-foreground">{story.label}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.id}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.deadLoad.toFixed(2)}</TableCell>
+                                <TableCell className="font-mono text-xs">{b.liveLoad.toFixed(2)}</TableCell>
+                                <TableCell className="font-mono text-xs">{(1.4 * b.deadLoad).toFixed(2)}</TableCell>
+                                <TableCell className="font-mono text-xs">{(1.2 * b.deadLoad + 1.6 * b.liveLoad).toFixed(2)}</TableCell>
+                                <TableCell className="text-xs">{b.slabs.join(', ') || '—'}</TableCell>
+                                <TableCell className="text-xs">
+                                  {pointLoads.length === 0 ? (
+                                    <span className="text-muted-foreground">—</span>
+                                  ) : (
+                                    <div className="flex flex-col gap-1">
+                                      {pointLoads.map((c, i) => (
+                                        <span key={i} className="inline-flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5 font-mono">
+                                          <span className="text-amber-600 font-bold">{c.reactionForce.toFixed(1)} kN</span>
+                                          <span className="text-muted-foreground">من</span>
+                                          <span className="text-blue-600 font-semibold">{c.secondaryBeamIds.join('+')}</span>
+                                          <span className="text-muted-foreground">@ {(c.distanceOnPrimary / 1000).toFixed(2)}م</span>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })
                         )}
                       </TableBody>
                     </Table>
