@@ -6,3 +6,9 @@ id = "jutqdLRQTVS0PQ1luIQZC"
 uri = "file://slabFEMEngine_report.txt"
 type = "text"
 title = "slabFEMEngine Development Report"
+
+[[outputs]]
+id = "JVRjh9fFBTMWeg8n3Wnli"
+uri = "file://FEM_Phase3_Report.txt"
+type = "text"
+title = "تقرير محرك نقل الأحمال — المرحلة الثالثة"
