@@ -218,13 +218,49 @@ const FEMComparisonPanel: React.FC<Props> = ({
   const beamRows: BeamRow[] = useMemo(() => {
     if (!computed || p8Results.length === 0) return [];
 
-    // Flatten all Phase 8 beam results (across all slabs)
-    const p8Map = new Map<string, MergedResult['beamResults'][number]>();
+    // ── Accumulate Phase 8 beam results from ALL slab solves ─────────────────
+    // ETABS approach: an internal beam receives load from both adjacent slabs.
+    // Each per-slab solve contributes its portion of the force.
+    // We accumulate shear/moment magnitudes from every slab that includes the beam.
+    interface AccBeam {
+      shears:   number[];    // accumulated |Vz| profile (kN)
+      moments:  number[];    // accumulated |My| profile (kN·m)
+      maxShear:  number;
+      maxMoment: number;
+      slabCount: number;     // how many slab solves contributed
+    }
+    const p8Acc = new Map<string, AccBeam>();
+
     for (const res of p8Results) {
       for (const br of res.beamResults) {
-        if (!p8Map.has(br.beamId)) p8Map.set(br.beamId, br);
+        if (!p8Acc.has(br.beamId)) {
+          p8Acc.set(br.beamId, {
+            shears:    [...br.elementShears_kN],
+            moments:   [...br.elementMoments_kNm],
+            maxShear:  br.maxShear_kN,
+            maxMoment: br.maxMoment_kNm,
+            slabCount: 1,
+          });
+        } else {
+          // Second (or more) slab contribution → add forces element-wise.
+          // This is physically correct: an internal beam is loaded from both sides.
+          const acc = p8Acc.get(br.beamId)!;
+          const len = Math.min(acc.shears.length, br.elementShears_kN.length);
+          for (let i = 0; i < len; i++) {
+            acc.shears[i]  += br.elementShears_kN[i];
+            acc.moments[i] += br.elementMoments_kNm[i];
+          }
+          acc.maxShear  = Math.max(acc.maxShear,  br.maxShear_kN);
+          acc.maxMoment = Math.max(acc.maxMoment, br.maxMoment_kNm);
+          acc.slabCount++;
+        }
       }
     }
+
+    // ── Beam type: dual detection ─────────────────────────────────────────────
+    // Primary:  beam appears in FEM results of ≥2 slab solves → Internal.
+    // Fallback: beam.slabs filtered to current model slabs has ≥2 entries.
+    const activeSlabIds = new Set(slabs.map(s => s.id));
 
     // 3D method map
     const tdMap = new Map<string, BeamLoadResult>();
@@ -233,9 +269,16 @@ const FEMComparisonPanel: React.FC<Props> = ({
     const rows: BeamRow[] = [];
 
     for (const beam of beams) {
-      const p8 = p8Map.get(beam.id);
-      const td = tdMap.get(beam.id);
-      if (!p8) continue;   // beam not in FEM solution — skip
+      const acc = p8Acc.get(beam.id);
+      const td  = tdMap.get(beam.id);
+      if (!acc) continue;   // beam not in FEM solution — skip
+
+      // Beam type: internal if seen from ≥2 slab solves OR beam.slabs has ≥2
+      // active slabs (handles the case where only one slab was solved).
+      const slabSolveCount   = acc.slabCount;
+      const activeSLabCount  = (beam.slabs ?? []).filter(id => activeSlabIds.has(id)).length;
+      const isInternal = slabSolveCount >= 2 || activeSLabCount >= 2;
+      const beamType: BeamRow['beamType'] = isInternal ? 'Internal' : 'Edge';
 
       // Span
       const L = beam.length;   // metres
@@ -253,36 +296,27 @@ const FEMComparisonPanel: React.FC<Props> = ({
         }
       }
 
-      // Phase 8 avg load from shear profile:
+      // Phase 8 avg load from accumulated shear profile:
       //   w_avg = Total vertical force / L
-      //   Total vertical force = V_start (left support) + V_end (right support)
-      //   elementShears_kN = [|Vz1_e0|, |Vz2_e0|, |Vz1_e1|, |Vz2_e1|, ...]
-      //   sh[0]  = left-end shear of first element  = left reaction
-      //   sh[last] = right-end shear of last element = right reaction
-      const sh = p8.elementShears_kN;
+      //   Total vertical force = V_start + V_end (left & right support reactions)
+      //   After accumulation, internal beam forces reflect both slab contributions.
+      const sh = acc.shears;
       const vStart = sh.length > 0 ? sh[0] : 0;
       const vEnd   = sh.length > 1 ? sh[sh.length - 1] : vStart;
-      const totalForceP8 = vStart + vEnd;    // kN — sum of support reactions
+      const totalForceP8 = vStart + vEnd;    // kN — accumulated support reactions
       const loadP8 = L > 1e-6 ? totalForceP8 / L : 0;
 
       // diff
       const diffPct = load3D > 1e-6 ? (loadP8 - load3D) / load3D * 100 : 0;
 
-      // Negative shear detection (use signed values via sign of diff across elements)
-      // Since elementShears_kN stores absolute values we check element moments for sign
-      // As a proxy: check if element moments change sign along the beam
-      const moments = p8.elementMoments_kNm;
+      // Negative shear / sign-reversal detection on accumulated moment profile
+      const moments = acc.moments;
       let hasNeg = false;
       for (let i = 1; i < moments.length; i++) {
-        // moments are absolute but detect if any is zero (sign reversal point)
         if (moments[i] < moments[i - 1] * 0.1 && i > 1 && i < moments.length - 1) {
           hasNeg = true;
         }
       }
-
-      // Beam type
-      const isInternal = (beam.slabs?.length ?? 0) >= 2;
-      const beamType: BeamRow['beamType'] = isInternal ? 'Internal' : 'Edge';
 
       // EI
       const ei = computeEI(beam, mat.fc);
@@ -296,8 +330,8 @@ const FEMComparisonPanel: React.FC<Props> = ({
         span_m:       L,
         load3D_kNm:   load3D,
         loadP8_kNm:   loadP8,
-        vmax_kN:      p8.maxShear_kN,
-        mmax_kNm:     p8.maxMoment_kNm,
+        vmax_kN:      acc.maxShear,
+        mmax_kNm:     acc.maxMoment,
         diffPct,
         behavior:     behaviorText(diffPct, isInternal, hasNeg),
         ei_kNm2:      ei,
@@ -308,7 +342,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
     }
 
     return rows;
-  }, [computed, p8Results, tdResults, beams, mat.fc]);
+  }, [computed, p8Results, tdResults, beams, slabs, mat.fc]);
 
   // ── sorted rows ─────────────────────────────────────────────────────────────
   const sortedRows = useMemo(() => {
@@ -432,6 +466,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
               >
                 <option value={2}>2 div/m (fast)</option>
                 <option value={3}>3 div/m (balanced)</option>
+                <option value={5}>5 div/m (precise)</option>
               </select>
             </div>
             <Button
