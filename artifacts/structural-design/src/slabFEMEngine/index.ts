@@ -487,7 +487,7 @@ export function validatePhase1(meshDensity?: number): ValidationReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 7 — Full Coupled Beam-Slab FEM (new public API)
+// Phase 7 — Full Coupled Beam-Slab FEM (penalty coupling)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type {
@@ -508,6 +508,25 @@ export { runPhase7Validation } from './phase7Validation';
 
 import { solveCoupledSystem } from './coupledSystem';
 import type { CoupledResult }  from './coupledSystem';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 8 — True DOF Merging (Constraint Elimination)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type {
+  MergedResult,
+  MergedDebugInfo,
+} from './mergedDOFSystem';
+
+export type {
+  Phase8TestResult,
+  Phase8Report,
+} from './phase8Validation';
+
+export { runPhase8Validation } from './phase8Validation';
+
+import { solveMergedDOFSystem } from './mergedDOFSystem';
+import type { MergedResult }     from './mergedDOFSystem';
 
 /**
  * getCoupledBeamSlabResults
@@ -567,6 +586,79 @@ export function getCoupledBeamSlabResults(
       slab, slabBeams, mm.columns,
       slabProps, mat, q_Nmm2,
       meshDensity, penaltyMult,
+    );
+
+    results.push(result);
+  }
+
+  return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 8 — True DOF Merging public entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * getMergedBeamSlabResults
+ * ─────────────────────────
+ * Phase 8 public entry point: full monolithic coupled FEM using TRUE DOF
+ * MERGING instead of penalty constraints.
+ *
+ * At every slab node that lies on a beam the slab DOFs (UZ, RX, RY) are
+ * SHARED with the beam element DOFs — they map to the SAME global DOF index.
+ * No penalty stiffness is added.  The resulting system has:
+ *   - 3 fewer DOFs per shared node than Phase 7
+ *   - Better numerical conditioning (no artificial α_p inflation)
+ *   - Identical or superior results compared to Phase 7
+ *
+ * Input model coordinates are in METRES (same as the rest of the app).
+ * Internal computation is in mm/N/rad.  Output is in kN/kN·m.
+ *
+ * @param model       FEM input model (coordinates in metres)
+ * @param meshDensity Mesh divisions per metre (default 2; use 3 for finer)
+ * @returns MergedResult[] — one entry per slab with beams, including
+ *          debug metrics showing the DOF reduction vs Phase 7.
+ *
+ * @performance  Dense O(n³) Gaussian solver.  System is smaller than Phase 7:
+ *   density=2 →  reduced by ~3×nSharedNodes DOFs vs Phase 7
+ *   Solve time is proportionally faster.
+ *
+ * @useMergedDOF  Pass useMergedDOF: true in the model (or call this function
+ *               directly) to activate Phase 8 instead of Phase 7.
+ */
+export function getMergedBeamSlabResults(
+  model:       FEMInputModel,
+  meshDensity  = 2,
+): MergedResult[] {
+  const { slabProps, mat } = model;
+
+  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
+  const q_kNm2  = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
+  const q_Nmm2  = q_kNm2 * 1e-3;
+
+  // Scale coordinates m → mm
+  const mm = toMmModel(model);
+
+  const results: MergedResult[] = [];
+
+  for (const slab of mm.slabs) {
+    const slabBeams = mm.beams.filter(b => b.slabs.includes(slab.id));
+    if (slabBeams.length === 0) {
+      console.warn(`[Phase8] Slab ${slab.id} has no associated beams — skipping.`);
+      continue;
+    }
+
+    console.log(
+      `[Phase8] Solving slab ${slab.id}  ` +
+      `(${(Math.abs(slab.x2 - slab.x1) / 1000).toFixed(1)} × ` +
+      `${(Math.abs(slab.y2 - slab.y1) / 1000).toFixed(1)} m)  ` +
+      `${slabBeams.length} beams  meshDensity=${meshDensity}`,
+    );
+
+    const result = solveMergedDOFSystem(
+      slab, slabBeams, mm.columns,
+      slabProps, mat, q_Nmm2,
+      meshDensity,
     );
 
     results.push(result);

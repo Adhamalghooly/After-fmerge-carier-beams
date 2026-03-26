@@ -37,6 +37,18 @@ export interface FEMInputModel {
    */
   stressMode?: 'shear-only' | 'full';
 
+  // ── Phase 8: True DOF Merging (Constraint Elimination) ───────────────────
+
+  /**
+   * Phase-8 mode switch.
+   * true  → use true DOF merging (shared nodes get unified DOF indices; no penalty).
+   * false → use Phase-7 penalty coupling (default for backward compatibility).
+   *
+   * When true, the public entry point is getMergedBeamSlabResults().
+   * Phase 7 (getCoupledBeamSlabResults) is unaffected by this flag.
+   */
+  useMergedDOF?: boolean;
+
   // ── Phase 6: Rotational Coupling ──────────────────────────────────────────
 
   /**
