@@ -58,6 +58,7 @@ import ETABSComparisonTable from "@/components/ETABSComparisonTable";
 import ProjectManager from "@/components/ProjectManager";
 import LevelPlanView from "@/components/LevelPlanView";
 import LoadComparisonPanel from "@/components/LoadComparisonPanel";
+import FEMComparisonPanel  from "@/components/FEMComparisonPanel";
 
 const ParamInput = ({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) => (
   <div className="space-y-1">
@@ -1636,6 +1637,7 @@ const Index = () => {
               <TabsList className="w-full justify-start rounded-none border-b border-border bg-muted/30 px-2 shrink-0 h-auto">
                 <TabsTrigger value="analysis-main" className="text-[11px] gap-1 min-h-[36px]"><Calculator size={12} />التحليل الرئيسي</TabsTrigger>
                 <TabsTrigger value="analysis-compare" className="text-[11px] gap-1 min-h-[36px] text-blue-600 dark:text-blue-400"><BarChart3 size={12} />مقارنة توزيع الأحمال</TabsTrigger>
+                <TabsTrigger value="analysis-fem-compare" className="text-[11px] gap-1 min-h-[36px] text-emerald-600 dark:text-emerald-400"><BarChart3 size={12} />Comparison</TabsTrigger>
               </TabsList>
               <TabsContent value="analysis-main" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
             {/* Duplicate Check Card - always visible */}
@@ -1916,6 +1918,17 @@ const Index = () => {
 
               <TabsContent value="analysis-compare" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
                 <LoadComparisonPanel
+                  slabs={storyFilteredSlabs}
+                  beams={beamsWithLoads}
+                  columns={columns}
+                  slabProps={slabProps}
+                  mat={mat}
+                  analyzed={analyzed}
+                  onRunAnalysis={runAnalysis}
+                />
+              </TabsContent>
+              <TabsContent value="analysis-fem-compare" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+                <FEMComparisonPanel
                   slabs={storyFilteredSlabs}
                   beams={beamsWithLoads}
                   columns={columns}
