@@ -1,0 +1,134 @@
+═══════════════════════════════════════════════════════════════
+         خلاصة ما تم تنفيذه — المرحلة الرابعة (Phase 4)
+         Slab-to-Beam Load Transfer Engine — Stress-Based Method
+═══════════════════════════════════════════════════════════════
+
+التاريخ: 26 مارس 2026
+المشروع: Structural Design Web Application — slabFEMEngine
+
+───────────────────────────────────────────────────────────────
+أولاً: الهدف من المرحلة الرابعة
+───────────────────────────────────────────────────────────────
+
+تنفيذ طريقة نقل الأحمال القائمة على الإجهادات (Stress-Based Edge
+Load Transfer) وفق معادلة:
+
+    t = σ · n   →   Qz = -(Qx·nx + Qy·ny)
+
+وذلك بالتوازي مع الطريقة الأولى (Phase 2 — Reaction-Based)، مع
+التحقق من صحة المنهجين عبر حالتَي اختبار جديدتين (Case 3 و Case 4).
+
+───────────────────────────────────────────────────────────────
+ثانياً: الملفات التي تم تعديلها
+───────────────────────────────────────────────────────────────
+
+1. stressEdgeTransfer.ts
+   ─────────────────────
+   • الملف كان مكتملاً مسبقاً ولم يُعدَّل.
+   • يحتوي على: تنعيم الإجهادات، كشف الحواف، حساب قوى القص،
+     تكامل غاوس على الحواف، وإخراج BeamEdgeForces.
+
+2. types.ts
+   ─────────
+   • إضافة الحقل الاختياري:
+       useStressBasedTransfer?: boolean
+     إلى واجهة FEMInputModel.
+   • هذا الحقل يتحكم في اختيار الطريقة داخل المحرك الرئيسي.
+
+3. validation.ts
+   ──────────────
+   أ) أنواع بيانات جديدة (Interfaces):
+      • Case3Report: يسجّل مجاميع قوى Phase 2 و Phase 4 على
+        الحواف المقيّدة والحواف الحرة، وعلامات النجاح/الفشل.
+      • Case4MeshStudyPoint: جدول نتائج لكل كثافة شبكة يحتوي
+        خطأ التفاعل، خطأ الإجهاد، والفرق بين المنهجين.
+      • Case4Report: تقرير دراسة التقارب مع مؤشرَي stressConverges
+        و methodsConverge.
+      • FullValidationReport: تم توسيعه بإضافة حقلَي case3 و case4.
+
+   ب) دالة runCase3FreeEdgeTest(density):
+      • بلاطة 5×5 م، حمل 10 كيلونيوتن/م²  →  إجمالي 250 كيلونيوتن.
+      • قيود FEM: الحافة اليسرى + اليمنى فقط.
+      • حافتان حرتان: الأمامية + الخلفية (لا قيود على العقد).
+      • المتوقع من Phase 2 على الحواف الحرة: صفر تماماً.
+      • المتوقع من Phase 4 على الحواف الحرة: قيمة أكبر من صفر
+        (قص Mxy من حل اللوح الثنائي الأبعاد).
+      • معيار النجاح: |P2_free| < 10 N  و  |P4_free| > 100 N.
+
+   ج) دالة runCase4MeshRefinementStudy():
+      • بلاطة 5×5 م، 4 عوارض حافية، كثافات: 2 / 4 / 6 أقسام/م.
+      • لكل كثافة: تشغيل Phase 2 و Phase 4 ومقارنة الإجمالي بالحمل
+        المطبَّق.
+      • معيار التقارب: خطأ آخر كثافة ≤ خطأ أول كثافة + 1%.
+      • الناتج: جدول مفصّل + مؤشران للتقارب.
+
+   د) تحديث runFullValidation():
+      • يستدعي الآن 5 اختبارات: Phase1 + Case1 + Case2 + Case3 + Case4.
+      • يطبع ملخصاً بخمسة أسطر ويُعيد التقرير الكامل الموسَّع.
+
+4. index.ts
+   ─────────
+   أ) استيرادات جديدة:
+      • extractStressEdgeForces من stressEdgeTransfer.ts
+      • summariseStressExtraction من stressEdgeTransfer.ts
+      • runCase3FreeEdgeTest، runCase4MeshRefinementStudy من validation.ts
+      • Case3Report، Case4Report، Case4MeshStudyPoint من validation.ts
+
+   ب) مفتاح الوضع داخل getBeamLoadsFromSlab():
+      if (useStressBasedTransfer) {
+          // Phase 4: استخراج القوى بتكامل الإجهادات
+          edgeForces = extractStressEdgeForces(...)
+          summariseStressExtraction(...)
+      } else {
+          // Phase 2: استخراج التفاعلات (الكود الأصلي — غير مُعدَّل)
+          edgeForces = extractBeamEdgeForces(...)
+          validatePhase2(...)
+      }
+
+   ج) صادرات جديدة للاستخدام الخارجي:
+      • runCase3FreeEdgeTest
+      • runCase4MeshRefinementStudy
+      • extractStressEdgeForces
+      • summariseStressExtraction
+      • Case3Report، Case4Report، Case4MeshStudyPoint (أنواع)
+
+───────────────────────────────────────────────────────────────
+ثالثاً: ما لم يُمَسَّ (Locked Code)
+───────────────────────────────────────────────────────────────
+
+• محلول FEM (solver, assembler, mesh) — لم يُعدَّل
+• Phase 2 — الكود الأصلي محفوظ كما هو تماماً
+• beamMapper.ts، internalForces.ts، edgeForces.ts — لم تُعدَّل
+• LoadComparisonPanel.tsx — متوافق تلقائياً (الحقل اختياري)
+
+───────────────────────────────────────────────────────────────
+رابعاً: نتائج التحقق
+───────────────────────────────────────────────────────────────
+
+• فحص TypeScript على جميع ملفات slabFEMEngine: صفر أخطاء
+• التطبيق يعمل بنجاح على المنفذ 20592
+• الكود القديم (Phase 2) يعمل بشكل افتراضي دون أي تغيير للمستخدم
+
+───────────────────────────────────────────────────────────────
+خامساً: كيفية التشغيل
+───────────────────────────────────────────────────────────────
+
+// الطريقة القديمة (Phase 2) — تعمل تلقائياً بدون تغيير
+getBeamLoadsFromSlab({ slabs, beams, columns, slabProps, mat })
+
+// الطريقة الجديدة (Phase 4 — stress-based)
+getBeamLoadsFromSlab({
+  slabs, beams, columns, slabProps, mat,
+  useStressBasedTransfer: true,
+})
+
+// تشغيل مجموعة الاختبارات الكاملة (5 اختبارات)
+runFullValidation()
+
+// اختبار الحافة الحرة منفرداً
+runCase3FreeEdgeTest(4)
+
+// دراسة التقارب منفردة
+runCase4MeshRefinementStudy()
+
+═══════════════════════════════════════════════════════════════

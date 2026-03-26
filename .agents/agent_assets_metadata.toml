@@ -12,3 +12,9 @@ id = "JVRjh9fFBTMWeg8n3Wnli"
 uri = "file://FEM_Phase3_Report.txt"
 type = "text"
 title = "تقرير محرك نقل الأحمال — المرحلة الثالثة"
+
+[[outputs]]
+id = "xmPacf8F-UjiYv2FopCdv"
+uri = "file://خلاصة_Phase4.txt"
+type = "text"
+title = "خلاصة Phase 4 — Stress-Based Load Transfer"
