@@ -1,61 +1,85 @@
 /**
- * slabFEMEngine – Phase 4: Stress-Based Edge Load Transfer
- * ══════════════════════════════════════════════════════════
+ * slabFEMEngine – Phase 4 / Phase 5: Stress-Based Edge Load Transfer
+ * ══════════════════════════════════════════════════════════════════════
  *
- * Computes slab-to-beam load transfer using the fundamental stress formula:
+ * ── Phase 4 (shear-only mode) ───────────────────────────────────────────────
  *
- *   t_z = −(Qx · n_x + Qy · n_y)          [kN/m]
+ *   Force traction:
+ *     t_z = −(Qx·nx + Qy·ny)          [kN/m]
  *
- * and 1-D Gauss integration along each element edge:
+ *   Nodal forces (1-D Gauss integration along each element edge):
+ *     f_edge = ∫ Nᵀ · t_z  dL         [N]
  *
- *   f_edge = ∫ N^T · t_z  dL              [N]
+ * ── Phase 5 (full moment-consistent mode — default) ─────────────────────────
  *
- * where
- *   Qx, Qy  = Mindlin transverse shear resultants   [kN/m]
- *   n       = outward normal to the element edge     (dimensionless)
- *   N       = linear edge shape functions            [N₁=(1−ξ)/2, N₂=(1+ξ)/2]
- *   L       = element edge length                    [mm]
+ *   In addition to the shear force above, the full moment tensor M is
+ *   projected onto the edge normal n to yield distributed moment tractions:
  *
- * Unit algebra: [kN/m] × [mm] = [N]  (exact — no extra conversion needed).
+ *     Moment traction vector:  m = M · n
+ *       mx_traction = Mx·nx + Mxy·ny     [kNm/m]
+ *       my_traction = Mxy·nx + My·ny     [kNm/m]
  *
- * ── Stress Smoothing ────────────────────────────────────────────────────────
- * Raw Gauss-point stresses (4 per element) are smoothed to nodes by simple
- * nodal averaging: each node accumulates the stresses of all surrounding
- * elements and divides by the count.  This is the minimum requirement for
- * stable edge extraction (avoids Gauss-point aliasing at boundaries).
+ *   where the Mindlin-Reissner moment tensor is:
+ *       M = [ Mx   Mxy ]
+ *           [ Mxy  My  ]
  *
- * ── Sign Convention ─────────────────────────────────────────────────────────
+ *   The slab imposes these tractions ON the beam (Newton 3rd, outward normal):
+ *       mx_beam = −mx_traction,   my_beam = −my_traction
+ *
+ *   Nodal moments (same 1-D Gauss integration):
+ *       Mx_Nm(node) = ∫ N · mx_beam  dL     [kNm/m × mm = N·m]
+ *       My_Nm(node) = ∫ N · my_beam  dL     [N·m]
+ *
+ * ── Unit algebra ─────────────────────────────────────────────────────────────
+ *   Force:   [kN/m] × [mm] = kN × mm/m = kN × 10⁻³ = 1 N        ✓
+ *   Moment:  [kNm/m] × [mm] = kNm × 10⁻³ = 1 N·m = 1 kN·mm      ✓
+ *
+ * ── Stress Smoothing ─────────────────────────────────────────────────────────
+ *   Raw Gauss-point stresses are smoothed to nodes by simple nodal averaging:
+ *   each node accumulates stresses from surrounding elements and divides by
+ *   the contribution count.
+ *
+ * ── Sign Convention ──────────────────────────────────────────────────────────
  *   t_z > 0  → downward load on beam  (gravity direction, consistent with Phase 2)
- *   t_z = −(Q · n)  because:
- *     • Q · n  is the shear traction ON THE SLAB from outside
- *     • If support pushes slab UP: Q·n < 0 (inward) → −(Q·n) > 0 on beam ✓
+ *   t_z = −(Q·n)  because Q·n is the traction the SLAB receives from outside;
+ *     if the beam pushes slab UP: Q·n < 0 → −(Q·n) > 0 on beam ✓
+ *
+ *   mx_beam = −(Mx·nx + Mxy·ny)   (beam receives the reaction of the slab moment)
+ *   my_beam = −(Mxy·nx + My·ny)
  *
  * ── Output Format ────────────────────────────────────────────────────────────
- * Returns BeamEdgeForces[] — EXACTLY the same interface consumed by Phase 3
- * (mapEdgeForcesToBeams).  Phase 3 remains unchanged.
+ *   Returns BeamEdgeForces[] — same interface as Phase 2.
+ *   Phase-5 fields Mx_Nm / My_Nm are populated per BeamNodeReaction.
+ *   Phase 3 (beamMapper) remains completely unchanged.
  *
- * ── Key Difference from Phase 2 ─────────────────────────────────────────────
- * Phase 2 (reaction-based):  works only where DOFs are constrained (beam nodes).
- * Phase 4 (stress-based):    works for ANY edge — including FREE edges where
- *                            Phase 2 gives zero by definition.
+ * ── stressMode parameter ─────────────────────────────────────────────────────
+ *   "shear-only"  → Phase 4 behaviour: Fz only, Mx_Nm = My_Nm = 0
+ *   "full"        → Phase 5 behaviour: Fz + Mx + My  (default)
  */
 
-import type { SlabMesh, FEMElement, FEMNode, Beam, SlabProps, MatProps } from './types';
-import type { BeamEdgeForces, BeamNodeReaction } from './edgeForces';
-import { computeInternalForces } from './internalForces';
-import type { ElementForceResult } from './types';
+import type { SlabMesh, FEMNode, Beam, SlabProps, MatProps } from './types';
+import type { BeamEdgeForces, BeamNodeReaction }             from './edgeForces';
+import { computeInternalForces }                             from './internalForces';
+import type { ElementForceResult }                           from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal types
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface NodeStress {
-  Qx: number;   // kN/m
-  Qy: number;   // kN/m
-  Mx: number;   // kN·m/m  (kept for potential Phase-5 use)
-  My: number;
-  Mxy: number;
+  Qx:    number;   // kN/m
+  Qy:    number;   // kN/m
+  Mx:    number;   // kNm/m
+  My:    number;   // kNm/m
+  Mxy:   number;   // kNm/m
   count: number;
+}
+
+/** Per-position accumulator for a single beam. */
+interface PosAccum {
+  Fz_N:   number;   // N
+  Mx_Nm:  number;   // N·m
+  My_Nm:  number;   // N·m
 }
 
 const EPS = 1e-3; // mm — coordinate matching tolerance
@@ -66,17 +90,16 @@ const EPS = 1e-3; // mm — coordinate matching tolerance
 
 /**
  * For each element:
- *   • 4 Gauss points provide Qx, Qy at their physical coordinates (x, y in mm).
- *   • We assign the ELEMENT AVERAGE to all 4 of its corner nodes.
- *   • After all elements, each node divides by contribution count (simple average).
+ *   • 4 Gauss points provide Qx, Qy, Mx, My, Mxy at physical coordinates.
+ *   • We assign the ELEMENT AVERAGE to all 4 corner nodes.
+ *   • After all elements, each node divides by contribution count.
  *
- * This is Nodal Averaging — the minimum valid smoothing per the prompt.
+ * This is Nodal Averaging — the minimum valid smoothing for stable extraction.
  */
 function smoothStressesToNodes(
   mesh:         SlabMesh,
   gaussResults: ElementForceResult[],
 ): Map<number, NodeStress> {
-  // nodeId → accumulator
   const acc = new Map<number, NodeStress>();
 
   const initNode = (): NodeStress => ({ Qx: 0, Qy: 0, Mx: 0, My: 0, Mxy: 0, count: 0 });
@@ -85,7 +108,6 @@ function smoothStressesToNodes(
     return acc.get(id)!;
   };
 
-  // Group Gauss results by elementId
   const byElem = new Map<number, ElementForceResult[]>();
   for (const r of gaussResults) {
     const list = byElem.get(r.elementId) ?? [];
@@ -97,7 +119,6 @@ function smoothStressesToNodes(
     const gpList = byElem.get(elem.id);
     if (!gpList || gpList.length === 0) continue;
 
-    // Element average stress
     let avgQx = 0, avgQy = 0, avgMx = 0, avgMy = 0, avgMxy = 0;
     for (const gp of gpList) {
       avgQx  += gp.resultants.Qx;
@@ -109,7 +130,6 @@ function smoothStressesToNodes(
     const n = gpList.length;
     avgQx /= n; avgQy /= n; avgMx /= n; avgMy /= n; avgMxy /= n;
 
-    // Distribute to all 4 corner nodes
     for (const nodeId of elem.nodeIds) {
       const nd = ensure(nodeId);
       nd.Qx  += avgQx;
@@ -121,7 +141,6 @@ function smoothStressesToNodes(
     }
   }
 
-  // Finalise averages
   for (const [, nd] of acc) {
     if (nd.count > 0) {
       nd.Qx  /= nd.count;
@@ -140,12 +159,12 @@ function smoothStressesToNodes(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 4 edges per element.  Index maps to:
+ * 4 edges per element, CCW node order: n0=(xmin,ymin), n1=(xmax,ymin),
+ *   n2=(xmax,ymax), n3=(xmin,ymax)
  *   0 → bottom (n0→n1), outward n = (0, −1)
  *   1 → right  (n1→n2), outward n = (+1, 0)
  *   2 → top    (n2→n3), outward n = (0, +1)
  *   3 → left   (n3→n0), outward n = (−1, 0)
- * Nodes are in CCW order: n0=(xmin,ymin), n1=(xmax,ymin), n2=(xmax,ymax), n3=(xmin,ymax)
  */
 const EDGE_DEF = [
   { iA: 0, iB: 1, nx:  0, ny: -1 },   // bottom
@@ -154,14 +173,7 @@ const EDGE_DEF = [
   { iA: 3, iB: 0, nx: -1, ny:  0 },   // left
 ] as const;
 
-/**
- * Returns true if both edge endpoints lie on the beam line (horizontal or vertical).
- * Coordinates in mm, matching tolerance EPS.
- */
-function edgeLiesOnBeam(
-  na: FEMNode, nb: FEMNode,
-  beam: Beam,
-): boolean {
+function edgeLiesOnBeam(na: FEMNode, nb: FEMNode, beam: Beam): boolean {
   if (beam.direction === 'horizontal') {
     const by = beam.y1;
     return Math.abs(na.y - by) < EPS && Math.abs(nb.y - by) < EPS
@@ -175,91 +187,97 @@ function edgeLiesOnBeam(
   }
 }
 
-/**
- * Signed position of a node along the beam axis (mm from beam start).
- */
 function posAlongBeam(node: FEMNode, beam: Beam): number {
-  if (beam.direction === 'horizontal') {
-    return node.x - Math.min(beam.x1, beam.x2);
-  } else {
-    return node.y - Math.min(beam.y1, beam.y2);
-  }
+  return beam.direction === 'horizontal'
+    ? node.x - Math.min(beam.x1, beam.x2)
+    : node.y - Math.min(beam.y1, beam.y2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Steps 3 + 4 – Compute edge traction and integrate
+// Steps 3 + 4 – 1-D Gauss integration (generalised)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GP1D = 1 / Math.sqrt(3); // Gauss point for 2-point rule
+const GP1D = 1 / Math.sqrt(3);
 const GAUSS_1D = [
   { xi: -GP1D, w: 1.0 },
   { xi:  GP1D, w: 1.0 },
 ] as const;
 
 /**
- * Computes the equivalent nodal forces at two edge nodes (na, nb) due to
- * traction t_z along the edge using 2-point Gauss quadrature.
+ * General 2-point Gauss integration of a linearly varying quantity q(ξ) = Na*qa + Nb*qb
+ * along an edge of length L_mm, using shape functions N1=(1−ξ)/2, N2=(1+ξ)/2.
  *
- * t_z [kN/m], L [mm] → f [N]   (unit exact: kN/m × mm = N)
+ * Returns equivalent nodal contributions:
+ *   qa_node = ∫ N1 · q(ξ)  (L/2) dξ
+ *   qb_node = ∫ N2 · q(ξ)  (L/2) dξ
+ *
+ * Units: [unit_of_q × mm]  → force [N] when q in kN/m; moment [N·m] when q in kNm/m.
  */
-function integrateEdge(
-  tz_a: number, tz_b: number,
-  L_mm: number,
-): { fa: number; fb: number } {
-  let fa = 0, fb = 0;
+function integrate1D(
+  qa: number, qb: number, L_mm: number,
+): { qa_node: number; qb_node: number } {
+  let qa_node = 0, qb_node = 0;
   const half = L_mm / 2;
 
   for (const gp of GAUSS_1D) {
-    const N1 = (1 - gp.xi) / 2;   // shape function at node a
-    const N2 = (1 + gp.xi) / 2;   // shape function at node b
-
-    const tz = N1 * tz_a + N2 * tz_b;   // interpolated traction
-
-    fa += N1 * tz * gp.w * half;
-    fb += N2 * tz * gp.w * half;
+    const N1 = (1 - gp.xi) / 2;
+    const N2 = (1 + gp.xi) / 2;
+    const q  = N1 * qa + N2 * qb;
+    qa_node += N1 * q * gp.w * half;
+    qb_node += N2 * q * gp.w * half;
   }
 
-  return { fa, fb };
+  return { qa_node, qb_node };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Public: Phase-4 entry point
+// Public: Phase-4/5 entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * extractStressEdgeForces
- * ────────────────────────
- * Returns BeamEdgeForces[] in the same format as Phase 2 (extractBeamEdgeForces).
+ * ─────────────────────────
+ * Phase 4 / Phase 5 slab→beam load transfer.
  *
- * Input coordinates: MILLIMETRES (the caller scales from metres if necessary).
- * Output: nodal forces in NEWTONS, positions in mm (same as Phase 2).
+ * @param mesh       - FEM mesh of the slab
+ * @param d_full     - full displacement vector (all DOFs)
+ * @param slabProps  - slab cross-section properties
+ * @param mat        - material properties
+ * @param beams      - beams adjacent to this slab
+ * @param stressMode - "shear-only" (Phase 4, Fz only) or "full" (Phase 5, Fz+Mx+My)
+ *
+ * Returns BeamEdgeForces[] in the same format as Phase 2.
+ * When stressMode = "full": Mx_Nm / My_Nm fields are populated on each node.
+ * When stressMode = "shear-only": Mx_Nm = My_Nm = 0 (backward-compatible).
  */
 export function extractStressEdgeForces(
-  mesh:      SlabMesh,
-  d_full:    number[],
-  slabProps: SlabProps,
-  mat:       MatProps,
-  beams:     Beam[],
+  mesh:       SlabMesh,
+  d_full:     number[],
+  slabProps:  SlabProps,
+  mat:        MatProps,
+  beams:      Beam[],
+  stressMode: 'shear-only' | 'full' = 'full',
 ): BeamEdgeForces[] {
 
-  // ── Step 1: Gauss-point stresses ────────────────────────────────────────
+  const includeMoments = stressMode === 'full';
+
+  // ── Step 1: compute Gauss-point stresses ─────────────────────────────────
   const gaussResults = computeInternalForces(mesh, d_full, slabProps, mat);
 
-  // ── Step 1b: Smooth to nodes ─────────────────────────────────────────────
+  // ── Step 1b: smooth to nodes ──────────────────────────────────────────────
   const nodeStress = smoothStressesToNodes(mesh, gaussResults);
 
-  // Fast lookup: nodeId → FEMNode
+  // Fast lookup
   const nodeById = new Map<number, FEMNode>();
   for (const nd of mesh.nodes) nodeById.set(nd.id, nd);
 
-  // ── Step 2–4: For each beam, scan element edges ──────────────────────────
-
-  // Accumulator: beamId → { posAlongBeam → Fz_N }
-  const beamAcc = new Map<string, Map<number, number>>();
+  // ── Step 2–4: accumulate per beam ──────────────────────────────────────────
+  // beamId → (posAlongBeam_mm → PosAccum)
+  const beamAcc = new Map<string, Map<number, PosAccum>>();
 
   for (const beam of beams) {
     if (!beam.slabs.includes(mesh.slabId)) continue;
-    beamAcc.set(beam.id, new Map<number, number>());
+    beamAcc.set(beam.id, new Map<number, PosAccum>());
   }
 
   if (beamAcc.size === 0) return [];
@@ -273,43 +291,70 @@ export function extractStressEdgeForces(
       const na  = nodeById.get(idA)!;
       const nb  = nodeById.get(idB)!;
 
-      // Edge length [mm]
       const L_mm = Math.hypot(nb.x - na.x, nb.y - na.y);
       if (L_mm < EPS) continue;
 
-      // Check all relevant beams
+      const nx = edgeDef.nx;
+      const ny = edgeDef.ny;
+
       for (const [beamId, posMap] of beamAcc) {
         const beam = beams.find(b => b.id === beamId)!;
-
         if (!edgeLiesOnBeam(na, nb, beam)) continue;
 
-        // Outward normal from element (points toward beam)
-        const nx = edgeDef.nx;
-        const ny = edgeDef.ny;
+        // ── Smoothed stresses at edge endpoints ────────────────────────────
+        const sa = nodeStress.get(idA) ?? { Qx: 0, Qy: 0, Mx: 0, My: 0, Mxy: 0, count: 0 };
+        const sb = nodeStress.get(idB) ?? { Qx: 0, Qy: 0, Mx: 0, My: 0, Mxy: 0, count: 0 };
 
-        // Smoothed shear at edge nodes [kN/m]
-        const sa = nodeStress.get(idA) ?? { Qx: 0, Qy: 0 };
-        const sb = nodeStress.get(idB) ?? { Qx: 0, Qy: 0 };
-
-        // Traction ON BEAM = −(Q · n)  [kN/m]
-        //   Q·n < 0 (inward, beam supports slab up) → −(Q·n) > 0 (downward load on beam) ✓
+        // ── Shear traction t_z = −(Q · n)  [kN/m] ─────────────────────────
+        //   Positive = downward load on beam (consistent with Phase 2 sign).
         const tz_a = -(sa.Qx * nx + sa.Qy * ny);
         const tz_b = -(sb.Qx * nx + sb.Qy * ny);
 
-        // 2-point Gauss integration → nodal forces [N]
-        const { fa, fb } = integrateEdge(tz_a, tz_b, L_mm);
+        // ── Force integration → nodal forces [N] ──────────────────────────
+        const { qa_node: fa, qb_node: fb } = integrate1D(tz_a, tz_b, L_mm);
 
-        // Accumulate by position along beam (mm)
+        // ── Moment traction m = −(M · n)  [kNm/m] ─────────────────────────
+        //   The slab boundary moment traction (outward normal) is:
+        //     m_vec = M · n  where  M = [ Mx   Mxy ]
+        //                                [ Mxy  My  ]
+        //   The beam receives the reaction: m_beam = −m_vec (Newton 3rd).
+        //   mx_beam = −(Mx·nx + Mxy·ny)
+        //   my_beam = −(Mxy·nx + My·ny)
+        let mxa_kNmm = 0, mxb_kNmm = 0;
+        let mya_kNmm = 0, myb_kNmm = 0;
+
+        if (includeMoments) {
+          mxa_kNmm = -(sa.Mx * nx + sa.Mxy * ny);
+          mxb_kNmm = -(sb.Mx * nx + sb.Mxy * ny);
+          mya_kNmm = -(sa.Mxy * nx + sa.My * ny);
+          myb_kNmm = -(sb.Mxy * nx + sb.My * ny);
+        }
+
+        // ── Moment integration → nodal moments [N·m] ─────────────────────
+        //   Unit: [kNm/m × mm] = [kNm × 10⁻³] = [N·m]   ✓
+        const { qa_node: mxa_node, qb_node: mxb_node } = integrate1D(mxa_kNmm, mxb_kNmm, L_mm);
+        const { qa_node: mya_node, qb_node: myb_node } = integrate1D(mya_kNmm, myb_kNmm, L_mm);
+
+        // ── Accumulate by position along beam ─────────────────────────────
         const posA = posAlongBeam(na, beam);
         const posB = posAlongBeam(nb, beam);
 
-        posMap.set(posA, (posMap.get(posA) ?? 0) + fa);
-        posMap.set(posB, (posMap.get(posB) ?? 0) + fb);
+        const accA: PosAccum = posMap.get(posA) ?? { Fz_N: 0, Mx_Nm: 0, My_Nm: 0 };
+        accA.Fz_N  += fa;
+        accA.Mx_Nm += mxa_node;
+        accA.My_Nm += mya_node;
+        posMap.set(posA, accA);
+
+        const accB: PosAccum = posMap.get(posB) ?? { Fz_N: 0, Mx_Nm: 0, My_Nm: 0 };
+        accB.Fz_N  += fb;
+        accB.Mx_Nm += mxb_node;
+        accB.My_Nm += myb_node;
+        posMap.set(posB, accB);
       }
     }
   }
 
-  // ── Step 5: Build BeamEdgeForces[] ─────────────────────────────────────
+  // ── Step 5: build BeamEdgeForces[] ────────────────────────────────────────
   const results: BeamEdgeForces[] = [];
 
   for (const [beamId, posMap] of beamAcc) {
@@ -322,22 +367,26 @@ export function extractStressEdgeForces(
 
     const reactions: BeamNodeReaction[] = [];
 
-    for (const [pos_mm, Fz_N] of posMap) {
-      // Approximate tributary length (refined by Phase 3 Voronoi step)
+    for (const [pos_mm, accum] of posMap) {
       const tribLen = span_mm / Math.max(posMap.size, 1);
       reactions.push({
-        nodeId:       -1,              // stress method — no mesh nodeId
+        nodeId:       -1,
         posAlongBeam: pos_mm,
         tributaryLen: tribLen,
-        Fz_N,
-        w_kNm:        tribLen > EPS ? Fz_N / tribLen : 0,
+        Fz_N:         accum.Fz_N,
+        w_kNm:        tribLen > EPS ? accum.Fz_N / tribLen : 0,
+        Mx_Nm:        accum.Mx_Nm,
+        My_Nm:        accum.My_Nm,
       });
     }
 
     reactions.sort((a, b) => a.posAlongBeam - b.posAlongBeam);
 
-    const totalForce_N = reactions.reduce((s, r) => s + r.Fz_N, 0);
-    results.push({ beamId, reactions, totalForce_N });
+    const totalForce_N    = reactions.reduce((s, r) => s + r.Fz_N, 0);
+    const totalMomentMx_Nm = reactions.reduce((s, r) => s + Math.abs(r.Mx_Nm ?? 0), 0);
+    const totalMomentMy_Nm = reactions.reduce((s, r) => s + Math.abs(r.My_Nm ?? 0), 0);
+
+    results.push({ beamId, reactions, totalForce_N, totalMomentMx_Nm, totalMomentMy_Nm });
   }
 
   return results;
@@ -348,23 +397,33 @@ export function extractStressEdgeForces(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function summariseStressExtraction(
-  results: BeamEdgeForces[],
+  results:         BeamEdgeForces[],
   totalApplied_kN: number,
+  stressMode:      'shear-only' | 'full' = 'full',
 ): void {
   const totalBeam_kN = results.reduce((s, r) => s + r.totalForce_N * 1e-3, 0);
   const err = totalApplied_kN > 1e-6
     ? Math.abs(totalApplied_kN - totalBeam_kN) / totalApplied_kN * 100
     : 0;
 
-  console.group('[Phase 4] Stress-Based Edge Transfer');
-  console.log(`  Applied = ${totalApplied_kN.toFixed(2)} kN`);
-  console.log(`  Beam loads total = ${totalBeam_kN.toFixed(2)} kN`);
-  console.log(`  Equilibrium error = ${err.toFixed(2)} %`);
+  const tag = stressMode === 'full' ? 'Phase 5 — Full (Fz+Mx+My)' : 'Phase 4 — Shear-Only (Fz)';
+  console.group(`[slabFEMEngine] ${tag}`);
+  console.log(`  Mode:             ${stressMode}`);
+  console.log(`  Applied load:     ${totalApplied_kN.toFixed(2)} kN`);
+  console.log(`  Beam loads total: ${totalBeam_kN.toFixed(2)} kN`);
+  console.log(`  Equil. error:     ${err.toFixed(2)} %`);
+
   for (const r of results) {
+    const mxTotal_kNm = (r.totalMomentMx_Nm ?? 0) * 1e-3;
+    const myTotal_kNm = (r.totalMomentMy_Nm ?? 0) * 1e-3;
     console.log(
-      `  Beam ${r.beamId}: ${(r.totalForce_N * 1e-3).toFixed(2)} kN  ` +
+      `  Beam ${r.beamId}: ` +
+      `Fz=${( r.totalForce_N * 1e-3).toFixed(2)} kN  ` +
+      `ΣMx=${mxTotal_kNm.toFixed(3)} kNm  ` +
+      `ΣMy=${myTotal_kNm.toFixed(3)} kNm  ` +
       `(${r.reactions.length} nodes)`,
     );
   }
+
   console.groupEnd();
 }

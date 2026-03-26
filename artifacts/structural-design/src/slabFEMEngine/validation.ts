@@ -132,12 +132,42 @@ export interface Case4Report {
   methodsConverge: boolean;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Case 5 — Moment-consistency validation result types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Case5Report {
+  passed: boolean;
+  notes: string[];
+  /** Phase 4 (shear-only): total Fz across all beams [kN]. */
+  shearOnlyFz_kN: number;
+  /** Phase 5 (full):       total Fz across all beams [kN]. */
+  fullFz_kN: number;
+  /** Phase 4: sum of |Mx| across all beam nodes [kNm] — must be ≈ 0. */
+  shearOnlyMxTotal_kNm: number;
+  /** Phase 5: sum of |Mx| across all beam nodes [kNm] — must be > threshold. */
+  fullMxTotal_kNm: number;
+  /** Phase 4: sum of |My| across all beam nodes [kNm] — must be ≈ 0. */
+  shearOnlyMyTotal_kNm: number;
+  /** Phase 5: sum of |My| across all beam nodes [kNm] — must be > threshold. */
+  fullMyTotal_kNm: number;
+  /** |applied − fullFz| / applied × 100 — equilibrium check. */
+  fullEquilibrium_pct: number;
+  /** True when shear-only gives zero moments and full gives non-zero moments. */
+  momentTransferDetected: boolean;
+  /** True when force equilibrium is maintained (< 5 %). */
+  forceEquilibriumOk: boolean;
+  /** True when Phase 5 Fz ≈ Phase 4 Fz (< 2 % difference) — force unchanged. */
+  forcesConsistent: boolean;
+}
+
 export interface FullValidationReport {
   phase1:    ValidationReport;
   case1:     { passed: boolean; equilibriumError_pct: number; notes: string[] };
   case2:     Case2Report;
   case3:     Case3Report;
   case4:     Case4Report;
+  case5:     Case5Report;
   allPassed: boolean;
 }
 
@@ -828,7 +858,159 @@ export function runCase4MeshRefinementStudy(): Case4Report {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Full validation – runs all five tests and returns a combined report
+// Case 5 – Moment-consistency test (Phase 5 vs Phase 4)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  Geometry:  5 × 5 m slab, all 4 edge beams fixed, q = 10 kN/m²  → 250 kN
+//
+//  Both Phase 4 (shear-only) and Phase 5 (full) are run on identical mesh.
+//
+//  Expected:
+//    1. Moment transfer detected:
+//       • shear-only:  |Mx| ≈ 0  AND  |My| ≈ 0  (no moments in output)
+//       • full mode:   |Mx| > 0  OR   |My| > 0  (moments transferred)
+//    2. Force consistency:
+//       • |fullFz − shearOnlyFz| / applied < 2 %  (adding moments doesn't shift forces)
+//    3. Force equilibrium:
+//       • |applied − fullFz| / applied < 5 %
+//
+//  Physical interpretation:
+//    A slab fixed to its edge beams develops non-zero Mx/My at the boundary
+//    (fixed-end moments).  Phase 5 captures this; Phase 4 does not.
+//    Enables correct beam design (hogging moment at support is transfered).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function runCase5MomentConsistencyTest(meshDensity = 4): Case5Report {
+  const notes: string[] = [];
+  const L = 5000;  // mm
+
+  const slab: Slab = { id: 's5', x1: 0, y1: 0, x2: L, y2: L, storyId: 'st1' };
+
+  const columns: Column[] = [
+    { id: 'c-bl', x: 0, y: 0, b: 400, h: 400, L: 3000 },
+    { id: 'c-br', x: L, y: 0, b: 400, h: 400, L: 3000 },
+    { id: 'c-tl', x: 0, y: L, b: 400, h: 400, L: 3000 },
+    { id: 'c-tr', x: L, y: L, b: 400, h: 400, L: 3000 },
+  ];
+
+  const beams: Beam[] = [
+    makeBeam('b-bot',   0, 0, L, 0, 'horizontal', 5, ['s5']),
+    makeBeam('b-top',   0, L, L, L, 'horizontal', 5, ['s5']),
+    makeBeam('b-left',  0, 0, 0, L, 'vertical',   5, ['s5']),
+    makeBeam('b-right', L, 0, L, L, 'vertical',   5, ['s5']),
+  ];
+
+  const q_kNm2 = 10.0;
+  const q_Nmm2 = q_kNm2 * 1e-3;
+  const applied = q_kNm2 * (L / 1000) ** 2;   // 250 kN
+
+  const slabProps = overrideQ(STD_SLAB_PROPS, q_kNm2, STD_MAT);
+
+  // ── FEM solve (shared by both methods) ────────────────────────────────────
+  const mesh = meshSlab(slab, beams, columns, meshDensity);
+  const sys  = assembleSystem(mesh, slabProps, STD_MAT, q_Nmm2);
+
+  if (sys.freeDOFs.length === 0) {
+    notes.push('ERROR: no free DOFs — model is fully restrained');
+    const zero: Case5Report = {
+      passed: false, notes,
+      shearOnlyFz_kN: 0, fullFz_kN: 0,
+      shearOnlyMxTotal_kNm: 0, fullMxTotal_kNm: 0,
+      shearOnlyMyTotal_kNm: 0, fullMyTotal_kNm: 0,
+      fullEquilibrium_pct: 100,
+      momentTransferDetected: false, forceEquilibriumOk: false, forcesConsistent: false,
+    };
+    return zero;
+  }
+
+  const solveR = solve(sys.K_ff.slice(), sys.F_f.slice());
+  const d_full = reconstructDisplacements(solveR.d, sys.freeDOFs, sys.nDOF);
+
+  // ── Phase 4: shear-only ────────────────────────────────────────────────────
+  const p4 = extractStressEdgeForces(mesh, d_full, slabProps, STD_MAT, beams, 'shear-only');
+
+  const p4Fz   = p4.reduce((s, r) => s + r.totalForce_N * 1e-3, 0);
+  const p4MxSum = p4.reduce((s, r) => s + (r.totalMomentMx_Nm ?? 0) * 1e-3, 0);
+  const p4MySum = p4.reduce((s, r) => s + (r.totalMomentMy_Nm ?? 0) * 1e-3, 0);
+
+  // ── Phase 5: full moment-consistent ───────────────────────────────────────
+  const p5 = extractStressEdgeForces(mesh, d_full, slabProps, STD_MAT, beams, 'full');
+
+  const p5Fz    = p5.reduce((s, r) => s + r.totalForce_N * 1e-3, 0);
+  const p5MxSum = p5.reduce((s, r) => s + (r.totalMomentMx_Nm ?? 0) * 1e-3, 0);
+  const p5MySum = p5.reduce((s, r) => s + (r.totalMomentMy_Nm ?? 0) * 1e-3, 0);
+
+  // ── Checks ────────────────────────────────────────────────────────────────
+  const fullEqErr = applied > 1e-6
+    ? Math.abs(applied - p5Fz) / applied * 100
+    : 0;
+
+  const forceEquilibriumOk = fullEqErr < 5.0;
+
+  const fzDiff_pct = applied > 1e-6
+    ? Math.abs(p5Fz - p4Fz) / applied * 100
+    : 0;
+  const forcesConsistent = fzDiff_pct < 2.0;
+
+  // Phase 4 should have near-zero moments (within floating-point noise)
+  const p4MomentNearZero = (Math.abs(p4MxSum) + Math.abs(p4MySum)) < 0.001;  // < 1 Nm
+  // Phase 5 should have non-zero moments (at least 1 kNm total)
+  const p5MomentNonZero  = (Math.abs(p5MxSum) + Math.abs(p5MySum)) > 1.0;    // > 1 kNm
+  const momentTransferDetected = p4MomentNearZero && p5MomentNonZero;
+
+  const passed = momentTransferDetected && forceEquilibriumOk && forcesConsistent;
+
+  // ── Debug report ─────────────────────────────────────────────────────────
+  notes.push('═══════════════════════════════════════════════════════');
+  notes.push('Case 5 — Moment-Consistency Validation (Phase 4 vs Phase 5)');
+  notes.push('Setup: 5×5 m slab | 4 edge beams | q = 10 kN/m² | mesh = ' + meshDensity);
+  notes.push(`Applied load = ${applied.toFixed(0)} kN`);
+  notes.push('─ Phase 4 (shear-only, Fz only) ────────────────────────');
+  notes.push(`  Total Fz:  ${p4Fz.toFixed(2)} kN`);
+  notes.push(`  ΣMx:       ${p4MxSum.toFixed(4)} kNm  (expected ≈ 0)`);
+  notes.push(`  ΣMy:       ${p4MySum.toFixed(4)} kNm  (expected ≈ 0)`);
+  const m4tag = p4MomentNearZero ? '→ ZERO as expected ✓' : '→ NON-ZERO (unexpected) ✗';
+  notes.push(`  Moments ≈ 0: ${m4tag}`);
+  notes.push('─ Phase 5 (full, Fz + Mx + My) ─────────────────────────');
+  notes.push(`  Total Fz:  ${p5Fz.toFixed(2)} kN`);
+  notes.push(`  ΣMx:       ${p5MxSum.toFixed(3)} kNm  (expected > 0)`);
+  notes.push(`  ΣMy:       ${p5MySum.toFixed(3)} kNm  (expected > 0)`);
+  const m5tag = p5MomentNonZero ? '→ NON-ZERO as expected ✓' : '→ ZERO (unexpected) ✗';
+  notes.push(`  Moments > 0: ${m5tag}`);
+  notes.push(`  Equilibrium error: ${fullEqErr.toFixed(2)} %  ${forceEquilibriumOk ? '✓' : '✗'}`);
+  notes.push('─ Consistency ───────────────────────────────────────────');
+  notes.push(`  Force difference P4→P5: ${fzDiff_pct.toFixed(2)} %  ${forcesConsistent ? '✓' : '✗'}`);
+  notes.push(`  Moment transfer detected: ${momentTransferDetected ? 'YES ✓' : 'NO ✗'}`);
+  notes.push('─ Physical interpretation ──────────────────────────────');
+  notes.push('  Fixed-edge slab develops hogging moments at the support.');
+  notes.push('  Phase 5 transfers these to the beam; Phase 4 discards them.');
+  notes.push('  Forces are unchanged — only rotational compatibility improves.');
+  notes.push('═══════════════════════════════════════════════════════');
+  notes.push(passed ? 'Case 5 PASSED ✓' : 'Case 5 FAILED ✗');
+
+  console.group('[slabFEMEngine] Case 5 Moment-Consistency Validation');
+  notes.forEach(n => console.log(n));
+  console.groupEnd();
+
+  return {
+    passed,
+    notes,
+    shearOnlyFz_kN:       p4Fz,
+    fullFz_kN:            p5Fz,
+    shearOnlyMxTotal_kNm: p4MxSum,
+    fullMxTotal_kNm:      p5MxSum,
+    shearOnlyMyTotal_kNm: p4MySum,
+    fullMyTotal_kNm:      p5MySum,
+    fullEquilibrium_pct:  fullEqErr,
+    momentTransferDetected,
+    forceEquilibriumOk,
+    forcesConsistent,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Full validation – runs all six tests and returns a combined report
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function runFullValidation(): FullValidationReport {
@@ -839,22 +1021,24 @@ export function runFullValidation(): FullValidationReport {
   const case2  = runCase2Validation(4);
   const case3  = runCase3FreeEdgeTest(4);
   const case4  = runCase4MeshRefinementStudy();
+  const case5  = runCase5MomentConsistencyTest(4);
 
   const allPassed = phase1.passed && case1.passed && case2.passed
-                  && case3.passed && case4.passed;
+                  && case3.passed && case4.passed && case5.passed;
 
-  console.log(`\n${'═'.repeat(55)}`);
+  console.log(`\n${'═'.repeat(60)}`);
   console.log('VALIDATION SUMMARY');
-  console.log(`  Phase 1 (FEM solver):         ${phase1.passed ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Case 1 (5×5 regression):      ${case1.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Case 2 (internal beam):       ${case2.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Case 3 (free-edge test):      ${case3.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Case 4 (mesh refinement):     ${case4.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Overall:                      ${allPassed ? 'ALL PASSED ✓' : 'SOME FAILED ✗'}`);
-  console.log('═'.repeat(55));
+  console.log(`  Phase 1 (FEM solver):              ${phase1.passed ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 1 (5×5 regression):           ${case1.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 2 (internal beam):            ${case2.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 3 (free-edge test):           ${case3.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 4 (mesh refinement):          ${case4.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 5 (moment consistency):       ${case5.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Overall:                           ${allPassed ? 'ALL PASSED ✓' : 'SOME FAILED ✗'}`);
+  console.log('═'.repeat(60));
   console.groupEnd();
 
-  return { phase1, case1, case2, case3, case4, allPassed };
+  return { phase1, case1, case2, case3, case4, case5, allPassed };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

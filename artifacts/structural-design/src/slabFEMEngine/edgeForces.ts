@@ -49,6 +49,20 @@ export interface BeamNodeReaction {
   Fz_N:  number;          // N
   /** Distributed load intensity: Fz_N / tributaryLen  [N/mm = kN/m]. */
   w_kNm: number;
+  /**
+   * Phase-5 (full moment-consistent transfer).
+   * Integrated moment about global X at this node from slab→beam edge traction.
+   * Units: N·m  (= kN·mm).
+   * Zero for Phase-2 (reaction-based) nodes — backward-compatible.
+   */
+  Mx_Nm?: number;
+  /**
+   * Phase-5 (full moment-consistent transfer).
+   * Integrated moment about global Y at this node from slab→beam edge traction.
+   * Units: N·m  (= kN·mm).
+   * Zero for Phase-2 (reaction-based) nodes — backward-compatible.
+   */
+  My_Nm?: number;
 }
 
 export interface BeamEdgeForces {
@@ -56,6 +70,16 @@ export interface BeamEdgeForces {
   reactions:    BeamNodeReaction[];
   /** Sum of Fz_N across all reactions (net downward load on beam in N). */
   totalForce_N: number;
+  /**
+   * Phase-5: sum of |Mx_Nm| across all reactions (N·m).
+   * Zero when moments are not computed (Phase 2 / shear-only mode).
+   */
+  totalMomentMx_Nm?: number;
+  /**
+   * Phase-5: sum of |My_Nm| across all reactions (N·m).
+   * Zero when moments are not computed (Phase 2 / shear-only mode).
+   */
+  totalMomentMy_Nm?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

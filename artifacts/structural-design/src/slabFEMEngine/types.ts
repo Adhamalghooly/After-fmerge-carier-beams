@@ -24,12 +24,18 @@ export interface FEMInputModel {
   /** Target element divisions per metre in each direction (default 4). */
   meshDensity?: number;
   /**
-   * Phase-4 mode switch (Step 6).
-   * true  → use stress-based edge transfer (σ·n integration) — Phase 4.
-   * false → use reaction-based extraction (R = K·d − F)      — Phase 2 (default).
-   * Both methods produce BeamEdgeForces[] consumed by Phase 3 unchanged.
+   * Phase-4 / Phase-5 mode switch.
+   * true  → use stress-based edge transfer (σ·n integration).
+   * false → use reaction-based extraction (R = K·d − F) — Phase 2 (default).
+   * Both produce BeamEdgeForces[] consumed by Phase 3 unchanged.
    */
   useStressBasedTransfer?: boolean;
+  /**
+   * Phase-5 internal mode (only relevant when useStressBasedTransfer = true).
+   * "shear-only" → Phase 4 behaviour: transfer Fz only (no moments).
+   * "full"       → Phase 5 behaviour: transfer Fz + Mx + My (default).
+   */
+  stressMode?: 'shear-only' | 'full';
 }
 
 // ─── Mesh ─────────────────────────────────────────────────────────────────────

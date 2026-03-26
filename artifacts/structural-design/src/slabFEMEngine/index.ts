@@ -73,6 +73,7 @@ import {
   runCase2Validation,
   runCase3FreeEdgeTest,
   runCase4MeshRefinementStudy,
+  runCase5MomentConsistencyTest,
   runFullValidation,
   assertPhase1Valid,
 } from './validation';
@@ -81,6 +82,7 @@ export type {
   Case2Report, Case2BeamResult,
   Case3Report,
   Case4Report, Case4MeshStudyPoint,
+  Case5Report,
   FullValidationReport,
 } from './validation';
 
@@ -90,6 +92,7 @@ export {
   runCase2Validation,
   runCase3FreeEdgeTest,
   runCase4MeshRefinementStudy,
+  runCase5MomentConsistencyTest,
   runFullValidation,
   assertPhase1Valid,
 };
@@ -127,6 +130,7 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
     slabProps, mat,
     meshDensity = 4,
     useStressBasedTransfer = false,
+    stressMode = 'full',
   } = model;
 
   const comparisonMode = (model as FEMInputModel & { comparisonMode?: boolean })
@@ -137,11 +141,12 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
   const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
   const q_Nmm2 = q_kNm2 * 1e-3;   // kN/m² → N/mm²
 
-  console.log(
-    `[slabFEMEngine] Mode: ${useStressBasedTransfer
-      ? 'Phase 4 — stress-based (σ·n)'
-      : 'Phase 2 — reaction-based (K·d − F)'}`,
-  );
+  const modeLabel = !useStressBasedTransfer
+    ? 'Phase 2 — reaction-based (K·d − F)'
+    : stressMode === 'full'
+      ? 'Phase 5 — stress-based full (Fz + Mx + My)'
+      : 'Phase 4 — stress-based shear-only (Fz)';
+  console.log(`[slabFEMEngine] Mode: ${modeLabel}`);
 
   const allEdgeForces = [];
 
@@ -199,9 +204,9 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
     let edgeForces;
 
     if (useStressBasedTransfer) {
-      // ── Phase 4: stress-based  t_z = −(Qx·nx + Qy·ny),  ∫N^T t dL ───────
-      edgeForces = extractStressEdgeForces(mesh, d_full, slabProps, mat, beams);
-      summariseStressExtraction(edgeForces, totalApplied_kN);
+      // ── Phase 4/5: stress-based  t = σ·n,  ∫N^T t dL ─────────────────────
+      edgeForces = extractStressEdgeForces(mesh, d_full, slabProps, mat, beams, stressMode);
+      summariseStressExtraction(edgeForces, totalApplied_kN, stressMode);
     } else {
       // ── Phase 2: reaction-based  R = K·d − F  (unchanged, locked) ─────────
       edgeForces = extractBeamEdgeForces(
