@@ -1,6 +1,9 @@
 modules = ["nodejs-24"]
 
 [[artifacts]]
+id = "artifacts/structural-design"
+
+[[artifacts]]
 id = "artifacts/api-server"
 
 [[artifacts]]
@@ -30,13 +33,13 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "pnpm --filter @workspace/structural-design run dev"
-waitForPort = 20592
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=20592 BASE_PATH=/ pnpm --filter @workspace/structural-design run dev"
+waitForPort = 20592
 
 [agent]
 stack = "PNPM_WORKSPACE"
