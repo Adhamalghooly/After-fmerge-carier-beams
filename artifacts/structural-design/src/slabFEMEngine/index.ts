@@ -666,3 +666,87 @@ export function getMergedBeamSlabResults(
 
   return results;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 9 — Sparse Solver Infrastructure
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type { Phase9DebugInfo }                from './sparsePhase9';
+export type { Phase9TestResult, Phase9Report } from './phase9Validation';
+export { runPhase9Validation }                 from './phase9Validation';
+export { solveSparsePhase9 }                   from './sparsePhase9';
+
+// CSR / sparse-matrix utilities
+export type { CSRMatrix }           from './sparseMatrix';
+export { TripletMatrix, csrStats, csrBandwidth, csrMemoryBytes } from './sparseMatrix';
+
+// Sparse solver utilities
+export type { SparseSolverOptions, SparseSolverResult } from './sparseSolver';
+export { cuthillMcKee, sparseSolve }           from './sparseSolver';
+
+import { solveSparsePhase9 as _solveSparse9 } from './sparsePhase9';
+import type { Phase9DebugInfo }                from './sparsePhase9';
+
+/**
+ * getSparseBeamSlabResults
+ * ─────────────────────────
+ * Phase 9 public entry point: full monolithic coupled FEM using the Phase 8
+ * DOF-merging layout, BUT assembled and solved in SPARSE format.
+ *
+ * Key improvements over Phases 7 and 8:
+ *   • No n×n dense matrix — assembly uses COO triplets → CSR.
+ *   • Memory: O(nnz) ≈ 0.5–2% of O(n²) for typical FEM meshes.
+ *   • Solver: PCG (CG) or sparse Cholesky, not Gaussian elimination.
+ *   • Reverse Cuthill-McKee reordering reduces bandwidth before solve.
+ *
+ * Input/output identical to getMergedBeamSlabResults() for easy comparison.
+ *
+ * @param model       FEM input model (coordinates in metres)
+ * @param meshDensity Mesh divisions per metre (default 2)
+ * @returns MergedResult[] — same structure as Phase 8, with Phase9DebugInfo
+ *          in the debug field (nnz, bandwidth, memory, solver metrics).
+ */
+export function getSparseBeamSlabResults(
+  model:       FEMInputModel,
+  meshDensity  = 2,
+): (MergedResult & { debug: Phase9DebugInfo })[] {
+  const { slabProps, mat, sparseSolverMethod = 'cg', useCuthillMcKee = true } = model;
+
+  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
+  const q_kNm2  = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
+  const q_Nmm2  = q_kNm2 * 1e-3;
+
+  const mm = toMmModel(model);
+
+  const results: (MergedResult & { debug: Phase9DebugInfo })[] = [];
+
+  for (const slab of mm.slabs) {
+    const slabBeams = mm.beams.filter(b => b.slabs.includes(slab.id));
+    if (slabBeams.length === 0) {
+      console.warn(`[Phase9] Slab ${slab.id} has no associated beams — skipping.`);
+      continue;
+    }
+
+    console.log(
+      `[Phase9] Solving slab ${slab.id}  ` +
+      `(${(Math.abs(slab.x2 - slab.x1) / 1000).toFixed(1)} × ` +
+      `${(Math.abs(slab.y2 - slab.y1) / 1000).toFixed(1)} m)  ` +
+      `${slabBeams.length} beams  meshDensity=${meshDensity}  ` +
+      `solver=${sparseSolverMethod}  RCM=${useCuthillMcKee}`,
+    );
+
+    const result = _solveSparse9(
+      slab, slabBeams, mm.columns,
+      slabProps, mat, q_Nmm2,
+      meshDensity,
+      {
+        method:          sparseSolverMethod,
+        useCuthillMcKee: useCuthillMcKee,
+      },
+    );
+
+    results.push(result);
+  }
+
+  return results;
+}

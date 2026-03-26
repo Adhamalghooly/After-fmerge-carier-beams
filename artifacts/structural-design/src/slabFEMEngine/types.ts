@@ -49,6 +49,42 @@ export interface FEMInputModel {
    */
   useMergedDOF?: boolean;
 
+  // ── Phase 9: Sparse Solver Infrastructure ─────────────────────────────────
+
+  /**
+   * Phase-9 sparse solver switch.
+   *
+   * true  → assemble K in CSR (Compressed Sparse Row) format using the
+   *         TripletMatrix COO builder; solve with PCG (Conjugate Gradient)
+   *         or sparse Cholesky.  Memory O(nnz) instead of O(n²).
+   *         Applies Reverse Cuthill-McKee reordering by default.
+   *
+   * false → keep existing dense Phase-8 assembly + Gaussian elimination
+   *         (default, for backward compatibility and validation comparison).
+   *
+   * Works in combination with useMergedDOF = true (Phase 8 DOF layout).
+   * If useMergedDOF is false, Phase 9 sparse assembly is applied to the
+   * Phase-7 penalty-coupled system instead.
+   */
+  useSparseSolver?: boolean;
+
+  /**
+   * Phase-9 sparse solver algorithm.
+   * 'cg'        → Preconditioned Conjugate Gradient with Jacobi preconditioner.
+   *               Recommended for large systems (> 5 000 free DOF).
+   * 'cholesky'  → Sparse Cholesky factorisation (K = L·Lᵀ).
+   *               Exact direct solver; suitable for small-to-medium systems.
+   * Default: 'cg'.
+   */
+  sparseSolverMethod?: 'cg' | 'cholesky';
+
+  /**
+   * Phase-9: Apply Reverse Cuthill-McKee DOF reordering before solving.
+   * Reduces matrix bandwidth, improving both Cholesky fill-in and CG convergence.
+   * Default: true.
+   */
+  useCuthillMcKee?: boolean;
+
   // ── Phase 6: Rotational Coupling ──────────────────────────────────────────
 
   /**

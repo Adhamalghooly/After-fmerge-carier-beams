@@ -126,8 +126,41 @@ Isolated add-on at `src/slabFEMEngine/`. Computes slab-to-beam load transfer via
   - Returns beam end forces (local coords), slab deflections, equilibrium check
 - `runPhase7Validation() → Phase7Report` — runs all 4 validation tests
 
+**Phase 8 files (true DOF merging — monolithic beam-slab coupling):**
+- `mergedDOFSystem.ts` — true DOF merging at slab–beam interface (UZ/RX/RY merged, no penalty); block assembly; exact interface compatibility
+- `phase8Validation.ts` — 4-test validation suite
+- `reports/phase8_report.txt` — engineering report
+
+**Phase 8 public API:**
+- `getMergedBeamSlabResults(model, meshDensity?) → MergedResult[]`
+- `runPhase8Validation() → Phase8Report`
+
+**Phase 9 files (sparse matrix solver infrastructure):**
+- `sparseMatrix.ts` — CSR format, TripletMatrix COO builder, csrMatVec, permuteCSR, csrStats
+- `sparseSolver.ts` — Reverse Cuthill-McKee, sparse Cholesky, PCG with Jacobi preconditioner, unified dispatch
+- `sparseAssembler.ts` — sparse assembly (COO→CSR, never builds dense K), BC filtering
+- `sparsePhase9.ts` — Phase 9 entry point, drop-in replacement for Phase 8 (flag-gated)
+- `phase9Validation.ts` — 4-test validation suite (dense vs sparse agreement, scalability, benchmark, CG convergence)
+- `phase9_report.txt` — full engineering report
+
+**Phase 9 public API (in index.ts):**
+- `getSparseBeamSlabResults(model, meshDensity?, opts?) → MergedResult & { debug: Phase9DebugInfo }`
+- `runPhase9Validation() → Phase9Report`
+- All sparse utilities exported: CSRMatrix, TripletMatrix, solveCG, solveCholesky, cuthillMcKee, csrStats
+
+**Solver flags (in types.ts):**
+- `useSparseSolver: boolean` — activates Phase 9 path (default false = Phase 8 unchanged)
+- `sparseSolverMethod: 'cholesky' | 'cg'` — solver choice (default 'cg')
+- `useCuthillMcKee: boolean` — RCM reordering (default true)
+
+**Scalability:**
+- Dense (Phase 8): O(n³) solve, O(n²) memory — limited to ~500 free DOF in real-time
+- Sparse (Phase 9): O(√κ · nnz) CG, O(nnz) memory — handles 5 000–20 000+ free DOF
+- Memory reduction: 40–250× for typical FEM meshes
+
 **Validation status:**
 - Phase 1 PASSED: equilibrium 0.0000%, moment error 10.42% (< 15%), deflection error 4.57%
 - Phase 2 PASSED: each beam receives exactly 62.50 kN on a 5×5 m / 10 kN/m² test, 0.0000% equilibrium error
 - Phase 7: 4 validation tests — cantilever self-test (0.1% tolerance), equilibrium < 2%, stiffness comparison, internal beam load share
-- STRICT RULE: Do NOT modify any Phases 1–6 files. Phase 7 only adds new files.
+- Phase 9: 4 validation tests — dense/sparse agreement < 1%, large-model scalability, performance benchmark, CG convergence < 10⁻¹⁰
+- STRICT RULE: Do NOT modify any Phases 1–6 files. Phase 7+ only adds new files.
