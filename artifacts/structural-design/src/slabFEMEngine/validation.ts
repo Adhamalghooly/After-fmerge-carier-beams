@@ -33,6 +33,7 @@ import { solve }                   from './solver';
 import { resultantsAtPoint }       from './internalForces';
 import { extractBeamEdgeForces, validatePhase2 } from './edgeForces';
 import { mapEdgeForcesToBeams }    from './beamMapper';
+import { extractStressEdgeForces, summariseStressExtraction } from './stressEdgeTransfer';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared material / section for all test cases
@@ -82,10 +83,61 @@ export interface Case2Report {
   notes:                string[];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Case 3 — Free-edge validation result types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Case3Report {
+  passed: boolean;
+  notes: string[];
+  /** Sum of Phase-2 (reaction) forces on the constrained edges (LEFT+RIGHT). */
+  reactionConstrained_kN: number;
+  /** Sum of Phase-2 (reaction) forces on the FREE edges (TOP+BOTTOM). Must be 0. */
+  reactionFreeEdge_kN: number;
+  /** Sum of Phase-4 (stress) forces on the constrained edges (LEFT+RIGHT). */
+  stressConstrained_kN: number;
+  /** Sum of Phase-4 (stress) forces on the FREE edges (TOP+BOTTOM). Must be > 0. */
+  stressFreeEdge_kN: number;
+  /** True when |reactionFreeEdge| < 10 N (effectively zero). */
+  reactionFreeEdgeIsZero: boolean;
+  /** True when stressFreeEdge > 100 N (meaningfully non-zero). */
+  stressFreeEdgeNonZero: boolean;
+  /** |applied − stressTotal| / applied × 100 — global equilibrium of Phase 4. */
+  stressTotalEquilibrium_pct: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Case 4 — Mesh-refinement study result types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Case4MeshStudyPoint {
+  density: number;
+  reactionTotal_kN:  number;
+  stressTotal_kN:    number;
+  /** |applied − reaction| / applied × 100. */
+  reactionError_pct: number;
+  /** |applied − stress|   / applied × 100. */
+  stressError_pct:   number;
+  /** |reaction − stress|  / applied × 100. */
+  methodDiff_pct:    number;
+}
+
+export interface Case4Report {
+  passed: boolean;
+  notes: string[];
+  meshStudy: Case4MeshStudyPoint[];
+  /** stressError_pct decreases (or stays stable) as density increases. */
+  stressConverges: boolean;
+  /** methodDiff_pct decreases (or stays stable) as density increases. */
+  methodsConverge: boolean;
+}
+
 export interface FullValidationReport {
   phase1:    ValidationReport;
   case1:     { passed: boolean; equilibriumError_pct: number; notes: string[] };
   case2:     Case2Report;
+  case3:     Case3Report;
+  case4:     Case4Report;
   allPassed: boolean;
 }
 
@@ -495,7 +547,288 @@ export function runCase2Validation(meshDensity = 4): Case2Report {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Full validation – runs all three tests and returns a combined report
+// Case 3 – Free-edge validation
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  Geometry:   5 × 5 m slab, q = 10 kN/m²  →  total = 250 kN
+//
+//  FEM constraints:
+//    • LEFT beam  (x = 0, vertical)   — support in mesh
+//    • RIGHT beam (x = 5 m, vertical) — support in mesh
+//    • 4 corner columns               — excluded from beam loads
+//
+//  FREE edges:
+//    • BOTTOM (y = 0) — no FEM constraint, but a virtual "query beam" is defined
+//    • TOP    (y = 5 m) — same
+//
+//  Expected:
+//    Phase 2 (reaction-based): BOTTOM + TOP = EXACTLY 0 kN
+//      (no constrained nodes at y = 0 or y = 5 m → zero by construction)
+//    Phase 4 (stress-based):   BOTTOM + TOP > 0 kN
+//      (shear Q·n flows along free edges in the 2D plate solution)
+//
+//  Physical interpretation:
+//    For a one-way slab spanning LEFT–RIGHT, Qy is small but non-zero near
+//    corners due to 2D plate effects (Mxy twisting).  The stress method detects
+//    this; the reaction method cannot (no DOFs constrained at free edges).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function runCase3FreeEdgeTest(meshDensity = 4): Case3Report {
+  const notes: string[] = [];
+  const L = 5000;  // mm
+
+  const slab: Slab = { id: 's3', x1: 0, y1: 0, x2: L, y2: L, storyId: 'st1' };
+
+  const columns: Column[] = [
+    { id: 'c-bl', x: 0, y: 0, b: 400, h: 400, L: 3000 },
+    { id: 'c-br', x: L, y: 0, b: 400, h: 400, L: 3000 },
+    { id: 'c-tl', x: 0, y: L, b: 400, h: 400, L: 3000 },
+    { id: 'c-tr', x: L, y: L, b: 400, h: 400, L: 3000 },
+  ];
+
+  // Constraining beams: LEFT and RIGHT — these enter meshSlab as FEM supports
+  const constrainingBeams: Beam[] = [
+    makeBeam('b-left',  0, 0, 0, L, 'vertical',   5, ['s3']),
+    makeBeam('b-right', L, 0, L, L, 'vertical',   5, ['s3']),
+  ];
+
+  // Free-edge query beams: TOP and BOTTOM — NOT in the mesh (no DOF constraints)
+  // but geometrically match element edges at y = 0 and y = L, so Phase 4 can
+  // integrate shear tractions along them.
+  const freeEdgeBeams: Beam[] = [
+    makeBeam('b-bottom', 0, 0, L, 0, 'horizontal', 5, ['s3']),
+    makeBeam('b-top',    0, L, L, L, 'horizontal', 5, ['s3']),
+  ];
+
+  const allBeams = [...constrainingBeams, ...freeEdgeBeams];
+
+  const q_kNm2 = 10.0;
+  const q_Nmm2 = q_kNm2 * 1e-3;
+  const totalApplied_kN = q_kNm2 * (L / 1000) ** 2;   // 250 kN
+
+  const slabProps = overrideQ(STD_SLAB_PROPS, q_kNm2, STD_MAT);
+
+  // ── FEM solve: mesh built with constraining beams only (LEFT+RIGHT) ────────
+  const mesh = meshSlab(slab, constrainingBeams, columns, meshDensity);
+  const sys  = assembleSystem(mesh, slabProps, STD_MAT, q_Nmm2);
+
+  if (sys.freeDOFs.length === 0) {
+    notes.push('ERROR: no free DOFs — model is fully restrained');
+    return {
+      passed: false, notes,
+      reactionConstrained_kN: 0, reactionFreeEdge_kN: 0,
+      stressConstrained_kN: 0,   stressFreeEdge_kN: 0,
+      reactionFreeEdgeIsZero: false, stressFreeEdgeNonZero: false,
+      stressTotalEquilibrium_pct: 100,
+    };
+  }
+
+  const solveR = solve(sys.K_ff.slice(), sys.F_f.slice());
+  const d_full = reconstructDisplacements(solveR.d, sys.freeDOFs, sys.nDOF);
+
+  // ── Phase 2: reaction-based — queries ALL beams including free-edge ones ───
+  // Constrained edges → get reactions from fixed DOFs.
+  // Free-edge beams   → no fixed DOFs at those positions → exactly 0.
+  const p2Forces = extractBeamEdgeForces(
+    mesh, sys.K_full, d_full, sys.F_full, sys.fixedDOFs, sys.nDOF, allBeams,
+  );
+
+  // ── Phase 4: stress-based — queries ALL beams including free-edge ones ────
+  // Constrained edges → shear integration (compare with Phase 2).
+  // Free-edge beams   → shear Q·n at boundary elements → non-zero from plate eqns.
+  const p4Forces = extractStressEdgeForces(mesh, d_full, slabProps, STD_MAT, allBeams);
+
+  // ── Compute per-category totals ───────────────────────────────────────────
+  const isConstrained = (id: string) => constrainingBeams.some(b => b.id === id);
+  const isFreeEdge    = (id: string) => freeEdgeBeams.some(b => b.id === id);
+
+  const p2Constrained = p2Forces
+    .filter(f => isConstrained(f.beamId))
+    .reduce((s, f) => s + f.totalForce_N * 1e-3, 0);
+  const p2FreeEdge = p2Forces
+    .filter(f => isFreeEdge(f.beamId))
+    .reduce((s, f) => s + f.totalForce_N * 1e-3, 0);
+
+  const p4Constrained = p4Forces
+    .filter(f => isConstrained(f.beamId))
+    .reduce((s, f) => s + f.totalForce_N * 1e-3, 0);
+  const p4FreeEdge = p4Forces
+    .filter(f => isFreeEdge(f.beamId))
+    .reduce((s, f) => s + f.totalForce_N * 1e-3, 0);
+
+  const p4Total = p4Constrained + p4FreeEdge;
+  const stressEqErr = totalApplied_kN > 1e-6
+    ? Math.abs(totalApplied_kN - p4Total) / totalApplied_kN * 100
+    : 0;
+
+  // Thresholds
+  const reactionFreeEdgeIsZero = Math.abs(p2FreeEdge) < 0.01;   // < 10 N ≡ zero
+  const stressFreeEdgeNonZero  = Math.abs(p4FreeEdge) > 0.10;   // > 100 N ≡ non-zero
+
+  const passed = reactionFreeEdgeIsZero && stressFreeEdgeNonZero;
+
+  // ── Debug summary ─────────────────────────────────────────────────────────
+  notes.push('═══════════════════════════════════════════════════════');
+  notes.push('Case 3 — Free-Edge Validation (Phase 4 vs Phase 2)');
+  notes.push('Setup: 5×5 m slab | LEFT+RIGHT constrained | TOP+BOTTOM free');
+  notes.push(`Applied load = ${totalApplied_kN.toFixed(0)} kN`);
+  notes.push('─ Phase 2 (reaction-based) ─────────────────────────────');
+  notes.push(`  Constrained edges (LEFT+RIGHT): ${p2Constrained.toFixed(2)} kN`);
+  const z2 = reactionFreeEdgeIsZero ? '→ ZERO as expected ✓' : '→ NON-ZERO (unexpected) ✗';
+  notes.push(`  Free edges    (TOP+BOTTOM):     ${p2FreeEdge.toFixed(6)} kN  ${z2}`);
+  notes.push('─ Phase 4 (stress-based) ───────────────────────────────');
+  notes.push(`  Constrained edges (LEFT+RIGHT): ${p4Constrained.toFixed(2)} kN`);
+  const z4 = stressFreeEdgeNonZero ? '→ NON-ZERO as expected ✓' : '→ ZERO (unexpected) ✗';
+  notes.push(`  Free edges    (TOP+BOTTOM):     ${p4FreeEdge.toFixed(2)} kN  ${z4}`);
+  notes.push(`  Phase 4 equilibrium error:      ${stressEqErr.toFixed(2)} %`);
+  notes.push('─ Physical interpretation ─────────────────────────────');
+  notes.push('  Phase 2 gives exactly 0 at free edges (no constrained DOFs there).');
+  notes.push('  Phase 4 detects non-zero shear Q·n from the 2D plate stress field.');
+  notes.push('  → Stress method works at ANY edge; reaction method requires constraints.');
+  notes.push('═══════════════════════════════════════════════════════');
+  notes.push(passed ? 'Case 3 PASSED ✓' : 'Case 3 FAILED ✗');
+
+  console.group('[slabFEMEngine] Case 3 Free-Edge Validation');
+  notes.forEach(n => console.log(n));
+  console.groupEnd();
+
+  return {
+    passed,
+    notes,
+    reactionConstrained_kN: p2Constrained,
+    reactionFreeEdge_kN:    p2FreeEdge,
+    stressConstrained_kN:   p4Constrained,
+    stressFreeEdge_kN:      p4FreeEdge,
+    reactionFreeEdgeIsZero,
+    stressFreeEdgeNonZero,
+    stressTotalEquilibrium_pct: stressEqErr,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Case 4 – Mesh refinement study
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  Geometry:   5 × 5 m slab, 4 edge beams, q = 10 kN/m²  →  250 kN
+//  Mesh densities tested: 2, 4, 6 divisions/m
+//
+//  For each density, BOTH Phase 2 (reaction) and Phase 4 (stress) are run.
+//
+//  Expected:
+//    • stressError_pct   decreases (or stays bounded) as density increases
+//    • methodDiff_pct    decreases as density increases (methods converge)
+//
+//  Convergence criterion: last-density error ≤ first-density error + 1 %
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function runCase4MeshRefinementStudy(): Case4Report {
+  const notes: string[] = [];
+  const L = 5000;  // mm
+  const densities = [2, 4, 6];
+
+  const slab: Slab = { id: 's4', x1: 0, y1: 0, x2: L, y2: L, storyId: 'st1' };
+
+  const columns: Column[] = [
+    { id: 'c-bl', x: 0, y: 0, b: 400, h: 400, L: 3000 },
+    { id: 'c-br', x: L, y: 0, b: 400, h: 400, L: 3000 },
+    { id: 'c-tl', x: 0, y: L, b: 400, h: 400, L: 3000 },
+    { id: 'c-tr', x: L, y: L, b: 400, h: 400, L: 3000 },
+  ];
+
+  const beams: Beam[] = [
+    makeBeam('b-bot',   0, 0, L, 0, 'horizontal', 5, ['s4']),
+    makeBeam('b-top',   0, L, L, L, 'horizontal', 5, ['s4']),
+    makeBeam('b-left',  0, 0, 0, L, 'vertical',   5, ['s4']),
+    makeBeam('b-right', L, 0, L, L, 'vertical',   5, ['s4']),
+  ];
+
+  const q_kNm2   = 10.0;
+  const q_Nmm2   = q_kNm2 * 1e-3;
+  const applied  = q_kNm2 * (L / 1000) ** 2;   // 250 kN
+  const slabProps = overrideQ(STD_SLAB_PROPS, q_kNm2, STD_MAT);
+
+  const meshStudy: Case4MeshStudyPoint[] = [];
+
+  for (const density of densities) {
+    const mesh = meshSlab(slab, beams, columns, density);
+    const sys  = assembleSystem(mesh, slabProps, STD_MAT, q_Nmm2);
+
+    if (sys.freeDOFs.length === 0) continue;
+
+    const solveR = solve(sys.K_ff.slice(), sys.F_f.slice());
+    const d_full = reconstructDisplacements(solveR.d, sys.freeDOFs, sys.nDOF);
+
+    // Phase 2 (reaction-based)
+    const p2 = extractBeamEdgeForces(
+      mesh, sys.K_full, d_full, sys.F_full, sys.fixedDOFs, sys.nDOF, beams,
+    );
+    const p2Total = p2.reduce((s, f) => s + f.totalForce_N * 1e-3, 0);
+
+    // Phase 4 (stress-based)
+    const p4 = extractStressEdgeForces(mesh, d_full, slabProps, STD_MAT, beams);
+    const p4Total = p4.reduce((s, f) => s + f.totalForce_N * 1e-3, 0);
+
+    const p2Err   = Math.abs(applied - p2Total) / applied * 100;
+    const p4Err   = Math.abs(applied - p4Total) / applied * 100;
+    const diffPct = Math.abs(p2Total - p4Total)  / applied * 100;
+
+    meshStudy.push({
+      density,
+      reactionTotal_kN:  p2Total,
+      stressTotal_kN:    p4Total,
+      reactionError_pct: p2Err,
+      stressError_pct:   p4Err,
+      methodDiff_pct:    diffPct,
+    });
+  }
+
+  // ── Convergence checks ────────────────────────────────────────────────────
+  const stressErrors = meshStudy.map(p => p.stressError_pct);
+  const diffs        = meshStudy.map(p => p.methodDiff_pct);
+
+  // Converges if the finest mesh error ≤ coarsest mesh error + 1 % tolerance
+  const stressConverges = stressErrors.length >= 2 &&
+    stressErrors[stressErrors.length - 1] <= stressErrors[0] + 1.0;
+  const methodsConverge = diffs.length >= 2 &&
+    diffs[diffs.length - 1] <= diffs[0] + 1.0;
+
+  const passed = stressConverges && methodsConverge;
+
+  // ── Report ────────────────────────────────────────────────────────────────
+  notes.push('═══════════════════════════════════════════════════════');
+  notes.push('Case 4 — Mesh Refinement Study');
+  notes.push('Setup: 5×5 m slab | 4 edge beams | q = 10 kN/m² | densities: 2, 4, 6');
+  notes.push(`Applied load = ${applied.toFixed(0)} kN`);
+  notes.push('─ Per-density results ──────────────────────────────────');
+  notes.push(' Density │ Reaction (kN) │ Stress (kN) │ P2 err% │ P4 err% │ Diff%');
+  notes.push(' ─────────┼───────────────┼─────────────┼─────────┼─────────┼──────');
+  for (const pt of meshStudy) {
+    notes.push(
+      `    ${pt.density.toString().padStart(3)}    │ ` +
+      `${pt.reactionTotal_kN.toFixed(2).padStart(12)} │ ` +
+      `${pt.stressTotal_kN.toFixed(2).padStart(11)} │ ` +
+      `${pt.reactionError_pct.toFixed(2).padStart(7)} │ ` +
+      `${pt.stressError_pct.toFixed(2).padStart(7)} │ ` +
+      `${pt.methodDiff_pct.toFixed(2).padStart(5)}`,
+    );
+  }
+  notes.push('─ Convergence ──────────────────────────────────────────');
+  notes.push(`  Stress error converges:  ${stressConverges ? 'YES ✓' : 'NO ✗'}`);
+  notes.push(`  Methods converge:        ${methodsConverge ? 'YES ✓' : 'NO ✗'}`);
+  notes.push('═══════════════════════════════════════════════════════');
+  notes.push(passed ? 'Case 4 PASSED ✓' : 'Case 4 FAILED ✗');
+
+  console.group('[slabFEMEngine] Case 4 Mesh Refinement Study');
+  notes.forEach(n => console.log(n));
+  console.groupEnd();
+
+  return { passed, notes, meshStudy, stressConverges, methodsConverge };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Full validation – runs all five tests and returns a combined report
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function runFullValidation(): FullValidationReport {
@@ -504,19 +837,24 @@ export function runFullValidation(): FullValidationReport {
   const phase1 = runPhase1Validation(6);
   const case1  = runCase1Regression(4);
   const case2  = runCase2Validation(4);
+  const case3  = runCase3FreeEdgeTest(4);
+  const case4  = runCase4MeshRefinementStudy();
 
-  const allPassed = phase1.passed && case1.passed && case2.passed;
+  const allPassed = phase1.passed && case1.passed && case2.passed
+                  && case3.passed && case4.passed;
 
   console.log(`\n${'═'.repeat(55)}`);
   console.log('VALIDATION SUMMARY');
-  console.log(`  Phase 1 (FEM solver):     ${phase1.passed ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Case 1 (5×5 regression):  ${case1.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Case 2 (internal beam):   ${case2.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
-  console.log(`  Overall:                  ${allPassed ? 'ALL PASSED ✓' : 'SOME FAILED ✗'}`);
+  console.log(`  Phase 1 (FEM solver):         ${phase1.passed ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 1 (5×5 regression):      ${case1.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 2 (internal beam):       ${case2.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 3 (free-edge test):      ${case3.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Case 4 (mesh refinement):     ${case4.passed  ? 'PASSED ✓' : 'FAILED ✗'}`);
+  console.log(`  Overall:                      ${allPassed ? 'ALL PASSED ✓' : 'SOME FAILED ✗'}`);
   console.log('═'.repeat(55));
   console.groupEnd();
 
-  return { phase1, case1, case2, allPassed };
+  return { phase1, case1, case2, case3, case4, allPassed };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

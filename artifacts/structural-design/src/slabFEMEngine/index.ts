@@ -66,23 +66,35 @@ import { solve } from './solver';
 import { computeInternalForces } from './internalForces';
 import { extractBeamEdgeForces, validatePhase2 } from './edgeForces';
 import { mapEdgeForcesToBeams } from './beamMapper';
+import { extractStressEdgeForces, summariseStressExtraction } from './stressEdgeTransfer';
 import {
   runPhase1Validation,
   runCase1Regression,
   runCase2Validation,
+  runCase3FreeEdgeTest,
+  runCase4MeshRefinementStudy,
   runFullValidation,
   assertPhase1Valid,
 } from './validation';
 
-export type { Case2Report, Case2BeamResult, FullValidationReport } from './validation';
+export type {
+  Case2Report, Case2BeamResult,
+  Case3Report,
+  Case4Report, Case4MeshStudyPoint,
+  FullValidationReport,
+} from './validation';
 
 export {
   runPhase1Validation,
   runCase1Regression,
   runCase2Validation,
+  runCase3FreeEdgeTest,
+  runCase4MeshRefinementStudy,
   runFullValidation,
   assertPhase1Valid,
 };
+
+export { extractStressEdgeForces, summariseStressExtraction } from './stressEdgeTransfer';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Slab moment comparison type (FEM center moments)
@@ -114,6 +126,7 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
     slabs, beams, columns,
     slabProps, mat,
     meshDensity = 4,
+    useStressBasedTransfer = false,
   } = model;
 
   const comparisonMode = (model as FEMInputModel & { comparisonMode?: boolean })
@@ -124,9 +137,15 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
   const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
   const q_Nmm2 = q_kNm2 * 1e-3;   // kN/m² → N/mm²
 
+  console.log(
+    `[slabFEMEngine] Mode: ${useStressBasedTransfer
+      ? 'Phase 4 — stress-based (σ·n)'
+      : 'Phase 2 — reaction-based (K·d − F)'}`,
+  );
+
   const allEdgeForces = [];
 
-  // ── Phase 1 + 2: per-slab solve ──────────────────────────────────────────
+  // ── Phase 1 + 2/4: per-slab solve ────────────────────────────────────────
   for (const slab of slabs) {
     // ─ Meshing ─────────────────────────────────────────────────────────────
     const mesh = meshSlab(slab, beams, columns, meshDensity);
@@ -176,12 +195,20 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
       `Error=${eqErr.toFixed(2)} %`,
     );
 
-    // ─ Phase 2: edge forces (signed nodal reactions w/ junction splitting) ──
-    const edgeForces = extractBeamEdgeForces(
-      mesh, sys.K_full, d_full, sys.F_full, sys.fixedDOFs, sys.nDOF, beams,
-    );
+    // ─ Phase 2 OR Phase 4: edge force extraction ──────────────────────────
+    let edgeForces;
 
-    validatePhase2(edgeForces, totalReaction_kN);
+    if (useStressBasedTransfer) {
+      // ── Phase 4: stress-based  t_z = −(Qx·nx + Qy·ny),  ∫N^T t dL ───────
+      edgeForces = extractStressEdgeForces(mesh, d_full, slabProps, mat, beams);
+      summariseStressExtraction(edgeForces, totalApplied_kN);
+    } else {
+      // ── Phase 2: reaction-based  R = K·d − F  (unchanged, locked) ─────────
+      edgeForces = extractBeamEdgeForces(
+        mesh, sys.K_full, d_full, sys.F_full, sys.fixedDOFs, sys.nDOF, beams,
+      );
+      validatePhase2(edgeForces, totalReaction_kN);
+    }
 
     allEdgeForces.push(...edgeForces);
   }

@@ -23,6 +23,13 @@ export interface FEMInputModel {
   mat:       MatProps;
   /** Target element divisions per metre in each direction (default 4). */
   meshDensity?: number;
+  /**
+   * Phase-4 mode switch (Step 6).
+   * true  → use stress-based edge transfer (σ·n integration) — Phase 4.
+   * false → use reaction-based extraction (R = K·d − F)      — Phase 2 (default).
+   * Both methods produce BeamEdgeForces[] consumed by Phase 3 unchanged.
+   */
+  useStressBasedTransfer?: boolean;
 }
 
 // ─── Mesh ─────────────────────────────────────────────────────────────────────
