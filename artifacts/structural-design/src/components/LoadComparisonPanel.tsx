@@ -27,7 +27,8 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Calculator, Info, Zap, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Calculator, Info, Zap, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 import type { Slab, Beam, Column, SlabProps, MatProps } from '@/lib/structuralEngine';
 import { designSlab } from '@/lib/structuralEngine';
@@ -239,6 +240,69 @@ const LoadComparisonPanel: React.FC<Props> = ({
     return { totalOrig, totalCorr, globalPct, allStable, maxKTheta, maxDelta };
   }, [couplingResults]);
 
+  // ── Excel export: Beam Load Comparison ────────────────────────────────────
+  const exportBeamLoads = () => {
+    const header = [
+      'الجسر', 'البحر (م)',
+      'DL قديم (kN/m)', 'LL قديم (kN/m)', 'مجموع قديم (kN)',
+      'FEM متوسط (kN/m)', 'FEM ذروة (kN/m)', 'مجموع FEM (kN)',
+      'Max w(x) (kN/m)', 'Min w(x) (kN/m)', 'الفرق (%)',
+    ];
+    const rows = beamRows.map(r => [
+      r.beamId,
+      +r.span.toFixed(2),
+      +r.oldDL.toFixed(2),
+      +r.oldLL.toFixed(2),
+      +r.oldTotal.toFixed(2),
+      +r.femAvg.toFixed(2),
+      +r.femPeak.toFixed(2),
+      +r.femTotal.toFixed(2),
+      +r.femMax.toFixed(2),
+      +r.femMin.toFixed(2),
+      +r.diff.toFixed(1),
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws['!cols'] = header.map(() => ({ wch: 18 }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'توزيع الأحمال على الجسور');
+    XLSX.writeFile(wb, 'مقارنة_توزيع_الأحمال_على_الجسور.xlsx');
+  };
+
+  // ── Excel export: Slab Moment Comparison ──────────────────────────────────
+  const exportSlabMoments = () => {
+    const header = [
+      'البلاطة', 'lx (م)', 'ly (م)', 'β', 'النوع',
+      'α قصير', 'Mx قديم (kN·م/م)', 'My قديم (kN·م/م)',
+      'Mx FEM (kN·م/م)', 'My FEM (kN·م/م)', 'M_avg FEM (kN·م/م)',
+      'Mxy FEM (kN·م/م)', 'M_avg مرجع (kN·م/م)',
+      'Δ Mx (%)', 'Δ My (%)',
+    ];
+    const rows = slabMomentRows.map(row => {
+      return [
+        row.slabId,
+        +row.lx_m.toFixed(2),
+        +row.ly_m.toFixed(2),
+        +row.beta.toFixed(3),
+        row.isOneWay ? 'أحادية' : 'ثنائية',
+        +row.shortCoeff.toFixed(4),
+        +row.oldMx.toFixed(3),
+        +row.oldMy.toFixed(3),
+        +row.fem.Mx.toFixed(3),
+        +row.fem.My.toFixed(3),
+        +row.M_avg_fem.toFixed(3),
+        +row.fem.Mxy.toFixed(3),
+        row.M_avg_old > 1e-4 ? +row.M_avg_old.toFixed(3) : '',
+        +row.diffMx.toFixed(1),
+        row.oldMy > 1e-4 ? +row.diffMy.toFixed(1) : '',
+      ];
+    });
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws['!cols'] = header.map(() => ({ wch: 20 }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'عزوم البلاطات');
+    XLSX.writeFile(wb, 'مقارنة_عزوم_البلاطات_عند_المنتصف.xlsx');
+  };
+
   // ─────────────────────────────────────────────────────────────────────────
   // Render
   // ─────────────────────────────────────────────────────────────────────────
@@ -344,13 +408,26 @@ const LoadComparisonPanel: React.FC<Props> = ({
       {computed && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              مقارنة توزيع الأحمال على الجسور
-              <Badge variant="outline" className="text-[10px]">kN/m · kN</Badge>
-              {useCoupling && (
-                <Badge className="bg-purple-500/15 text-purple-700 dark:text-purple-400 border-purple-400/40 text-[10px]">Phase 6</Badge>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm flex items-center gap-2">
+                مقارنة توزيع الأحمال على الجسور
+                <Badge variant="outline" className="text-[10px]">kN/m · kN</Badge>
+                {useCoupling && (
+                  <Badge className="bg-purple-500/15 text-purple-700 dark:text-purple-400 border-purple-400/40 text-[10px]">Phase 6</Badge>
+                )}
+              </CardTitle>
+              {beamRows.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1 text-green-700 dark:text-green-400 border-green-400/50 hover:bg-green-500/10"
+                  onClick={exportBeamLoads}
+                >
+                  <Download size={13} />
+                  تصدير Excel
+                </Button>
               )}
-            </CardTitle>
+            </div>
             <p className="text-xs text-muted-foreground mt-1">
               الطريقة التقليدية: حمل موزع ثابت (DL + LL) × البحر.
               محرك FEM: حمل موزع متغير w(x){useCoupling ? ' مع تصحيح التكافؤ الدوراني' : ''}.
@@ -417,10 +494,23 @@ const LoadComparisonPanel: React.FC<Props> = ({
       {computed && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              مقارنة عزوم البلاطات عند المنتصف
-              <Badge variant="outline" className="text-[10px]">kN·م/م</Badge>
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm flex items-center gap-2">
+                مقارنة عزوم البلاطات عند المنتصف
+                <Badge variant="outline" className="text-[10px]">kN·م/م</Badge>
+              </CardTitle>
+              {slabMomentRows.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1 text-green-700 dark:text-green-400 border-green-400/50 hover:bg-green-500/10"
+                  onClick={exportSlabMoments}
+                >
+                  <Download size={13} />
+                  تصدير Excel
+                </Button>
+              )}
+            </div>
             <p className="text-xs text-muted-foreground mt-1">
               الطريقة التقليدية: معامل Marcus/ACI × q<sub>service</sub> × lx².
               محرك FEM: عزوم Mx/My عند أقرب نقطة غاوس للمنتصف. M_avg = (|Mx| + |My|) / 2.
