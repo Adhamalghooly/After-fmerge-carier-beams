@@ -65,8 +65,14 @@ import { assembleSystem, reconstructDisplacements, extractReactions } from './as
 import { solve } from './solver';
 import { computeInternalForces } from './internalForces';
 import { extractBeamEdgeForces, validatePhase2 } from './edgeForces';
+import type { BeamEdgeForces } from './edgeForces';
 import { mapEdgeForcesToBeams } from './beamMapper';
 import { extractStressEdgeForces, summariseStressExtraction } from './stressEdgeTransfer';
+import {
+  applyRotationalCoupling,
+  runPhase6Regression,
+} from './rotationalCoupling';
+import type { RotationalCouplingResult } from './rotationalCoupling';
 import {
   runPhase1Validation,
   runCase1Regression,
@@ -98,6 +104,19 @@ export {
 };
 
 export { extractStressEdgeForces, summariseStressExtraction } from './stressEdgeTransfer';
+export { runPhase6Regression } from './rotationalCoupling';
+export type { RotationalCouplingResult, RotationalCouplingNodeResult } from './rotationalCoupling';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extended result type for Phase-6 output
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BeamLoadsWithCouplingResult {
+  /** Phase-3 distributed load results (w(x) profile) — same format as getBeamLoadsFromSlab. */
+  loads: BeamLoadResult[];
+  /** Phase-6 rotational coupling data per beam (empty if coupling disabled). */
+  coupling: RotationalCouplingResult[];
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Slab moment comparison type (FEM center moments)
@@ -121,42 +140,29 @@ export interface SlabMomentComparison {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main entry point
+// Internal: shared per-slab solve (Phases 1-5)
+// Stores mesh + d_full so Phase 6 can extract rotations.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
-  const {
-    slabs, beams, columns,
-    slabProps, mat,
-    meshDensity = 4,
-    useStressBasedTransfer = false,
-    stressMode = 'full',
-  } = model;
+interface SlabSolveRecord {
+  mesh:        ReturnType<typeof meshSlab>;
+  d_full:      number[];
+  edgeForces:  BeamEdgeForces[];
+}
 
-  const comparisonMode = (model as FEMInputModel & { comparisonMode?: boolean })
-    .comparisonMode ?? false;
+function _solveSlabs(
+  model:               FEMInputModel,
+  useStressBasedTransfer: boolean,
+  stressMode:          'shear-only' | 'full',
+  q_Nmm2:              number,
+): SlabSolveRecord[] {
+  const { slabs, beams, columns, slabProps, mat, meshDensity = 4 } = model;
+  const records: SlabSolveRecord[] = [];
 
-  // Surface pressure: q = ownWeight + finishLoad + liveLoad
-  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
-  const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
-  const q_Nmm2 = q_kNm2 * 1e-3;   // kN/m² → N/mm²
-
-  const modeLabel = !useStressBasedTransfer
-    ? 'Phase 2 — reaction-based (K·d − F)'
-    : stressMode === 'full'
-      ? 'Phase 5 — stress-based full (Fz + Mx + My)'
-      : 'Phase 4 — stress-based shear-only (Fz)';
-  console.log(`[slabFEMEngine] Mode: ${modeLabel}`);
-
-  const allEdgeForces = [];
-
-  // ── Phase 1 + 2/4: per-slab solve ────────────────────────────────────────
   for (const slab of slabs) {
-    // ─ Meshing ─────────────────────────────────────────────────────────────
     const mesh = meshSlab(slab, beams, columns, meshDensity);
     console.log(`[slabFEMEngine] ${meshSummary(mesh)}`);
 
-    // ─ Assembly ────────────────────────────────────────────────────────────
     const sys = assembleSystem(mesh, slabProps, mat, q_Nmm2);
 
     if (sys.freeDOFs.length === 0) {
@@ -164,7 +170,6 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
       continue;
     }
 
-    // ─ Solve ───────────────────────────────────────────────────────────────
     const solveResult = solve(sys.K_ff.slice(), sys.F_f.slice());
 
     if (!solveResult.converged) {
@@ -174,11 +179,9 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
       );
     }
 
-    const d_full = reconstructDisplacements(
-      solveResult.d, sys.freeDOFs, sys.nDOF,
-    );
+    const d_full = reconstructDisplacements(solveResult.d, sys.freeDOFs, sys.nDOF);
 
-    // ─ Phase 1 debug log ───────────────────────────────────────────────────
+    // Phase 1 equilibrium log
     const reactions = extractReactions(
       sys.K_full, d_full, sys.F_full, sys.fixedDOFs, sys.nDOF,
     );
@@ -200,33 +203,172 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
       `Error=${eqErr.toFixed(2)} %`,
     );
 
-    // ─ Phase 2 OR Phase 4: edge force extraction ──────────────────────────
-    let edgeForces;
+    // Phase 2 or Phase 4/5
+    let edgeForces: BeamEdgeForces[];
 
     if (useStressBasedTransfer) {
-      // ── Phase 4/5: stress-based  t = σ·n,  ∫N^T t dL ─────────────────────
       edgeForces = extractStressEdgeForces(mesh, d_full, slabProps, mat, beams, stressMode);
       summariseStressExtraction(edgeForces, totalApplied_kN, stressMode);
     } else {
-      // ── Phase 2: reaction-based  R = K·d − F  (unchanged, locked) ─────────
       edgeForces = extractBeamEdgeForces(
         mesh, sys.K_full, d_full, sys.F_full, sys.fixedDOFs, sys.nDOF, beams,
       );
       validatePhase2(edgeForces, totalReaction_kN);
     }
 
-    allEdgeForces.push(...edgeForces);
+    records.push({ mesh, d_full, edgeForces });
   }
 
-  // ── Phase 3: map to beams (force-conservative) ────────────────────────────
-  const beamLoads = mapEdgeForcesToBeams(allEdgeForces, beams, {
+  return records;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main entry point (Phases 1–3, backward-compatible)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
+  const {
+    slabProps, mat,
+    useStressBasedTransfer = false,
+    stressMode = 'full',
+  } = model;
+
+  const comparisonMode = (model as FEMInputModel & { comparisonMode?: boolean })
+    .comparisonMode ?? false;
+
+  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
+  const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
+  const q_Nmm2 = q_kNm2 * 1e-3;
+
+  const modeLabel = !useStressBasedTransfer
+    ? 'Phase 2 — reaction-based (K·d − F)'
+    : stressMode === 'full'
+      ? 'Phase 5 — stress-based full (Fz + Mx + My)'
+      : 'Phase 4 — stress-based shear-only (Fz)';
+  console.log(`[slabFEMEngine] Mode: ${modeLabel}`);
+
+  const records = _solveSlabs(model, useStressBasedTransfer, stressMode, q_Nmm2);
+  const allEdgeForces: BeamEdgeForces[] = records.flatMap(r => r.edgeForces);
+
+  return mapEdgeForcesToBeams(allEdgeForces, model.beams, {
+    comparisonMode,
+    slabs:     model.slabs,
+    slabProps: model.slabProps,
+    mat:       model.mat,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase-6 entry point: returns loads + coupling data
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * getBeamLoadsWithCoupling
+ * ─────────────────────────
+ * Runs Phases 1–5 and optionally Phase 6 (rotational coupling).
+ *
+ * When model.useRotationalCoupling = true AND model.useStressBasedTransfer = true
+ * AND model.stressMode = 'full', Phase 6 corrects the transferred moments using
+ * the rotational spring model: M_corrected = M_phase5 − kθ · Δθ.
+ *
+ * Returns both the Phase-3 load profiles and the Phase-6 coupling details.
+ * If coupling is disabled, coupling[] will be empty and loads match Phase-5.
+ */
+export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCouplingResult {
+  const {
+    slabProps, mat, beams, slabs,
+    useStressBasedTransfer = true,
+    stressMode             = 'full',
+    useRotationalCoupling  = false,
+    couplingAlpha          = 1.0,
+  } = model;
+
+  const comparisonMode = (model as FEMInputModel & { comparisonMode?: boolean })
+    .comparisonMode ?? false;
+
+  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
+  const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
+  const q_Nmm2 = q_kNm2 * 1e-3;
+
+  // Phases 1–5 per slab
+  const records = _solveSlabs(
+    { ...model, useStressBasedTransfer, stressMode },
+    useStressBasedTransfer,
+    stressMode,
+    q_Nmm2,
+  );
+
+  let allEdgeForces: BeamEdgeForces[] = records.flatMap(r => r.edgeForces);
+  const allCouplingResults: RotationalCouplingResult[] = [];
+
+  // Phase 6: rotational coupling (only when Phase-5 moments are available)
+  const hasMoments = useStressBasedTransfer && stressMode === 'full';
+
+  if (useRotationalCoupling && hasMoments) {
+    console.log(
+      `[slabFEMEngine] Phase 6 — Rotational Coupling ENABLED  (α = ${couplingAlpha})`,
+    );
+
+    // Apply coupling per slab (each slab has its own mesh + d_full)
+    const coupledEdgeForces: BeamEdgeForces[] = [];
+
+    for (const record of records) {
+      const { correctedEdgeForces, couplingResults } = applyRotationalCoupling(
+        record.mesh,
+        record.d_full,
+        record.edgeForces,
+        beams,
+        mat,
+        couplingAlpha,
+      );
+      coupledEdgeForces.push(...correctedEdgeForces);
+      allCouplingResults.push(...couplingResults);
+    }
+
+    allEdgeForces = coupledEdgeForces;
+
+    // Debug: total rotation differences
+    const totalMaxDelta = allCouplingResults.reduce((s, r) => s + r.maxDeltaTheta_rad, 0);
+    const totalBeams    = allCouplingResults.length;
+    console.log(
+      `[Phase 6] Total beams coupled: ${totalBeams}  ` +
+      `Sum max|Δθ|: ${(totalMaxDelta * 1000).toFixed(3)} mrad`,
+    );
+
+    // Total applied load vs total beam loads (regression check)
+    const totalApplied_kN = records.reduce((s, rec) => {
+      const slabObj = slabs.find(sl => sl.id === rec.mesh.slabId);
+      if (!slabObj) return s;
+      const area = Math.abs(slabObj.x2 - slabObj.x1) * Math.abs(slabObj.y2 - slabObj.y1);
+      return s + q_Nmm2 * area * 1e-3;
+    }, 0);
+    const totalBeamFz_kN = allEdgeForces.reduce((s, ef) => s + ef.totalForce_N * 1e-3, 0);
+    const fzErr = totalApplied_kN > 1e-6
+      ? Math.abs(totalApplied_kN - totalBeamFz_kN) / totalApplied_kN * 100 : 0;
+
+    console.log(
+      `[Phase 6] Equilibrium check (vertical forces): ` +
+      `Applied = ${totalApplied_kN.toFixed(2)} kN, ` +
+      `Beam Fz total = ${totalBeamFz_kN.toFixed(2)} kN, ` +
+      `Error = ${fzErr.toFixed(2)} %  ` +
+      `(Phase-6 does NOT alter Fz — error should match Phase-5)`,
+    );
+
+  } else if (useRotationalCoupling && !hasMoments) {
+    console.warn(
+      '[slabFEMEngine] Phase 6 requested but Phase-5 moments are not available. ' +
+      'Set useStressBasedTransfer=true and stressMode="full" to enable coupling.',
+    );
+  }
+
+  const loads = mapEdgeForcesToBeams(allEdgeForces, beams, {
     comparisonMode,
     slabs,
     slabProps,
     mat,
   });
 
-  return beamLoads;
+  return { loads, coupling: allCouplingResults };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

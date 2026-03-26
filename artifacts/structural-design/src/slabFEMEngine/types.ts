@@ -36,6 +36,27 @@ export interface FEMInputModel {
    * "full"       → Phase 5 behaviour: transfer Fz + Mx + My (default).
    */
   stressMode?: 'shear-only' | 'full';
+
+  // ── Phase 6: Rotational Coupling ──────────────────────────────────────────
+
+  /**
+   * Phase-6 mode switch.
+   * true  → apply rotational spring coupling (beam stiffness feedback on slab moments).
+   * false → skip coupling (Phase 5 moments used unchanged — default).
+   *
+   * Requires useStressBasedTransfer = true + stressMode = 'full' to have
+   * meaningful Phase-5 moments to correct.  If Phase-5 data is absent,
+   * Phase-6 correction will be zero (no-op).
+   */
+  useRotationalCoupling?: boolean;
+
+  /**
+   * Rotational spring tuning factor α in kθ = α · E_c · I / L.
+   * Default 1.0.  Range [0.1, 10.0] recommended.
+   * Values > 1 increase the coupling effect (approach rigid connection).
+   * Values < 1 reduce coupling (approach pinned / semi-rigid).
+   */
+  couplingAlpha?: number;
 }
 
 // ─── Mesh ─────────────────────────────────────────────────────────────────────
