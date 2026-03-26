@@ -3,6 +3,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * Engineering comparison between:
  *   • Phase 8 FEM  — True DOF Merging (getMergedBeamSlabResults)
+ *   • Phase 7 FEM  — Penalty-based coupled FEM (getCoupledBeamSlabResults)
  *   • 3D Method    — Tributary-based load distribution (getBeamLoadsFromSlab)
  *
  * Five sections:
@@ -32,9 +33,11 @@ import {
 import type { Slab, Beam, Column, SlabProps, MatProps } from '@/lib/structuralEngine';
 import {
   getMergedBeamSlabResults,
+  getCoupledBeamSlabResults,
   getBeamLoadsFromSlab,
 } from '@/slabFEMEngine';
 import type { MergedResult, BeamLoadResult } from '@/slabFEMEngine';
+import type { CoupledResult } from '@/slabFEMEngine/coupledSystem';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -58,6 +61,7 @@ interface BeamRow {
   span_m:       number;
   load3D_kNm:   number;   // 3D Method avg distributed load (kN/m)
   loadP8_kNm:   number;   // Phase 8 FEM avg distributed load (kN/m)
+  loadP7_kNm:   number;   // Phase 7 FEM avg distributed load (kN/m) — penalty-based
   vmax_kN:      number;   // Phase 8 max shear (kN)
   mmax_kNm:     number;   // Phase 8 max moment (kN·m)
   diffPct:      number;   // (P8 − 3D) / 3D × 100
@@ -178,6 +182,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
 
   // Raw engine results (cached — only recomputed on demand)
   const [p8Results,  setP8Results]  = useState<MergedResult[]>([]);
+  const [p7Results,  setP7Results]  = useState<CoupledResult[]>([]);
   const [tdResults,  setTdResults]  = useState<BeamLoadResult[]>([]);
   const [modelHash,  setModelHash]  = useState('');
 
@@ -195,6 +200,9 @@ const FEMComparisonPanel: React.FC<Props> = ({
         // Phase 8 — true DOF merging
         const p8 = getMergedBeamSlabResults(femModel, meshDensity);
 
+        // Phase 7 — penalty-based coupled FEM
+        const p7 = getCoupledBeamSlabResults(femModel, meshDensity);
+
         // 3D Method — traditional tributary
         const td = getBeamLoadsFromSlab({
           ...femModel,
@@ -203,6 +211,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
         } as never);
 
         setP8Results(p8);
+        setP7Results(p7);
         setTdResults(td);
         setModelHash(hash);
         setComputed(true);
@@ -245,6 +254,34 @@ const FEMComparisonPanel: React.FC<Props> = ({
           // Second (or more) slab contribution → add forces element-wise.
           // This is physically correct: an internal beam is loaded from both sides.
           const acc = p8Acc.get(br.beamId)!;
+          const len = Math.min(acc.shears.length, br.elementShears_kN.length);
+          for (let i = 0; i < len; i++) {
+            acc.shears[i]  += br.elementShears_kN[i];
+            acc.moments[i] += br.elementMoments_kNm[i];
+          }
+          acc.maxShear  = Math.max(acc.maxShear,  br.maxShear_kN);
+          acc.maxMoment = Math.max(acc.maxMoment, br.maxMoment_kNm);
+          acc.slabCount++;
+        }
+      }
+    }
+
+    // ── Accumulate Phase 7 beam results from ALL slab solves ─────────────────
+    // Same ETABS approach for penalty-based coupled FEM (Phase 7).
+    const p7Acc = new Map<string, AccBeam>();
+
+    for (const res of p7Results) {
+      for (const br of res.beamResults) {
+        if (!p7Acc.has(br.beamId)) {
+          p7Acc.set(br.beamId, {
+            shears:    [...br.elementShears_kN],
+            moments:   [...br.elementMoments_kNm],
+            maxShear:  br.maxShear_kN,
+            maxMoment: br.maxMoment_kNm,
+            slabCount: 1,
+          });
+        } else {
+          const acc = p7Acc.get(br.beamId)!;
           const len = Math.min(acc.shears.length, br.elementShears_kN.length);
           for (let i = 0; i < len; i++) {
             acc.shears[i]  += br.elementShears_kN[i];
@@ -306,6 +343,16 @@ const FEMComparisonPanel: React.FC<Props> = ({
       const totalForceP8 = vStart + vEnd;    // kN — accumulated support reactions
       const loadP8 = L > 1e-6 ? totalForceP8 / L : 0;
 
+      // Phase 7 avg load from accumulated shear profile (penalty-based FEM):
+      const p7Acc2 = p7Acc.get(beam.id);
+      let loadP7 = 0;
+      if (p7Acc2 && L > 1e-6) {
+        const sh7 = p7Acc2.shears;
+        const v7Start = sh7.length > 0 ? sh7[0] : 0;
+        const v7End   = sh7.length > 1 ? sh7[sh7.length - 1] : v7Start;
+        loadP7 = (v7Start + v7End) / L;
+      }
+
       // diff
       const diffPct = load3D > 1e-6 ? (loadP8 - load3D) / load3D * 100 : 0;
 
@@ -330,6 +377,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
         span_m:       L,
         load3D_kNm:   load3D,
         loadP8_kNm:   loadP8,
+        loadP7_kNm:   loadP7,
         vmax_kN:      acc.maxShear,
         mmax_kNm:     acc.maxMoment,
         diffPct,
@@ -342,7 +390,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
     }
 
     return rows;
-  }, [computed, p8Results, tdResults, beams, slabs, mat.fc]);
+  }, [computed, p8Results, p7Results, tdResults, beams, slabs, mat.fc]);
 
   // ── sorted rows ─────────────────────────────────────────────────────────────
   const sortedRows = useMemo(() => {
@@ -382,6 +430,16 @@ const FEMComparisonPanel: React.FC<Props> = ({
       });
     }
 
+    // Phase 7 — penalty-based coupled FEM
+    for (const r of p7Results) {
+      rows.push({
+        method:   'Phase 7 FEM (Penalty-based)',
+        total:    r.equilibrium.totalApplied_kN,
+        reaction: r.equilibrium.totalReactions_kN,
+        err:      r.equilibrium.errorPct,
+      });
+    }
+
     // 3D method: sum of beam forces vs slab total load
     const ownW = (slabProps.thickness / 1000) * mat.gamma;
     const q_kNm2 = ownW + slabProps.finishLoad + slabProps.liveLoad;
@@ -408,7 +466,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
     });
 
     return rows;
-  }, [computed, p8Results, tdResults, slabs, beams, slabProps, mat]);
+  }, [computed, p8Results, p7Results, tdResults, slabs, beams, slabProps, mat]);
 
   // ── Not analyzed guard ──────────────────────────────────────────────────────
   if (!analyzed) {
@@ -499,7 +557,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
               <Badge variant="outline" className="text-[10px]">kN · kN/m · kN·m</Badge>
             </CardTitle>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              FEM Phase 8 avg load vs 3D tributary method — internal beams highlighted in blue.
+              FEM Phase 8 (DOF Merging) and Phase 7 (Penalty) avg load vs 3D tributary method — internal beams highlighted in blue.
               Sort by any column header.
             </p>
           </CardHeader>
@@ -517,6 +575,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
                     <SH>Span (m)</SH>
                     <SH>3D Load (kN/m)</SH>
                     <SH>FEM P8 Avg (kN/m)</SH>
+                    <SH>FEM P7 Avg (kN/m)</SH>
                     <SH onClick={() => toggleSort('vmax')} sorted={sortKey === 'vmax'}>Vmax (kN)</SH>
                     <SH onClick={() => toggleSort('mmax')} sorted={sortKey === 'mmax'}>Mmax (kN·m)</SH>
                     <SH onClick={() => toggleSort('diffPct')} sorted={sortKey === 'diffPct'}>Diff %</SH>
@@ -546,6 +605,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
                       <TC>{row.span_m.toFixed(2)}</TC>
                       <TC className="bg-muted/20">{row.load3D_kNm.toFixed(2)}</TC>
                       <TC className="bg-emerald-500/5 font-semibold">{row.loadP8_kNm.toFixed(2)}</TC>
+                      <TC className="bg-amber-500/5 font-semibold">{row.loadP7_kNm.toFixed(2)}</TC>
                       <TC className="bg-emerald-500/5">{row.vmax_kN.toFixed(2)}</TC>
                       <TC className="bg-emerald-500/5">{row.mmax_kNm.toFixed(2)}</TC>
                       <TC>{diffBadge(row.diffPct)}</TC>
@@ -639,7 +699,7 @@ const FEMComparisonPanel: React.FC<Props> = ({
               C — Global Equilibrium Check
             </CardTitle>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              Verification that ΣReactions = ΣApplied Load for each method. FEM Phase 8 enforces equilibrium exactly.
+              Verification that ΣReactions = ΣApplied Load for each method. FEM Phase 8 (DOF Merging) and Phase 7 (Penalty) both enforce equilibrium; Phase 7 may show small penalty error.
             </p>
           </CardHeader>
           <CardContent className="overflow-x-auto p-0">
