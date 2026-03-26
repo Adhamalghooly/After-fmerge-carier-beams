@@ -1,0 +1,172 @@
+═══════════════════════════════════════════════════════════════
+         خلاصة ما تم تنفيذه — المرحلة الخامسة (Phase 5)
+         Full Moment-Consistent Edge Transfer
+         نقل الأحمال والعزوم من البلاطات إلى الجسور
+═══════════════════════════════════════════════════════════════
+
+التاريخ: 26 مارس 2026
+المشروع: Structural Design Web Application — slabFEMEngine
+
+───────────────────────────────────────────────────────────────
+أولاً: المشكلة التي حُلّت
+───────────────────────────────────────────────────────────────
+
+المرحلة الرابعة (Phase 4) كانت تنقل القوى فقط:
+
+    t_z = −(Qx·nx + Qy·ny)         [kN/m]
+
+وكانت العزوم (Mx, My, Mxy) غير مستخدمة، مما يعني:
+
+  ❌ الجسور تتلقى قوى فقط، دون عزوم انعطاف
+  ❌ لا توافق دوراني بين البلاطة والجسر
+  ❌ تصميم الجسور غير صحيح (يفقد عزم التثبيت عند الحافة)
+
+───────────────────────────────────────────────────────────────
+ثانياً: الفيزياء المُضافة (Phase 5)
+───────────────────────────────────────────────────────────────
+
+لكل حافة عنصر بمتجه عمودي خارجي n = (nx, ny):
+
+  ─ قوة القص (كما كانت) ──────────────────────────────────────
+      t_z = −(Qx·nx + Qy·ny)                    [kN/m]
+
+  ─ عزم الانعطاف المُضاف (Phase 5 جديد) ───────────────────────
+      mx_traction = −(Mx·nx + Mxy·ny)            [kNm/m]
+      my_traction = −(Mxy·nx + My·ny)            [kNm/m]
+
+  حيث مصفوفة العزوم هي (نظرية Mindlin-Reissner):
+      M = [ Mx   Mxy ]
+          [ Mxy  My  ]
+
+  التكامل العددي (نقطتا Gauss على كل حافة):
+      Fz(عقدة)  = ∫ N^T · t_z  dL     [kN/m × mm = N]
+      Mx(عقدة)  = ∫ N^T · mx   dL     [kNm/m × mm = N·m]
+      My(عقدة)  = ∫ N^T · my   dL     [N·m]
+
+  قاعدة الإشارة (Newton 3rd):
+      البلاطة تدفع القوة والعزم على الجسر بالاتجاه المعاكس.
+
+───────────────────────────────────────────────────────────────
+ثالثاً: الملفات التي تم تعديلها
+───────────────────────────────────────────────────────────────
+
+1. edgeForces.ts
+   ─────────────
+   توسيع BeamNodeReaction (توافق عكسي — الحقول اختيارية):
+     • Mx_Nm?: number   → عزم الانعطاف عن المحور X عند العقدة [N·m]
+     • My_Nm?: number   → عزم الانعطاف عن المحور Y عند العقدة [N·m]
+
+   توسيع BeamEdgeForces:
+     • totalMomentMx_Nm?: number  → مجموع |Mx| على الجسر [N·m]
+     • totalMomentMy_Nm?: number  → مجموع |My| على الجسر [N·m]
+
+   ملاحظة: Phase 2 (طريقة التفاعل) لا تملأ هذه الحقول إطلاقاً.
+   الكود القديم يعمل بدون أي تعديل.
+
+2. types.ts
+   ─────────
+   إضافة حقل جديد إلى FEMInputModel:
+
+     stressMode?: 'shear-only' | 'full'
+
+     'shear-only' → سلوك Phase 4: ينقل Fz فقط (بدون عزوم)
+     'full'       → سلوك Phase 5: ينقل Fz + Mx + My (الافتراضي)
+
+3. stressEdgeTransfer.ts  ← إعادة كتابة كاملة
+   ──────────────────────
+   الدالة: extractStressEdgeForces(... stressMode = 'full')
+
+   أ) ما تغيّر:
+      • معامل جديد stressMode يتحكم في الوضع
+      • دالة integrate1D() معممة لأي كمية خطية (قوة أو عزم)
+      • حساب mx_traction و my_traction عند كل عقدة حافية
+      • تكامل العزوم بنفس قاعدة Gauss للقوى
+      • تجميع Mx_Nm و My_Nm لكل موقع على الجسر
+
+   ب) ما بقي كما هو:
+      • التنعيم العقدي (Nodal Averaging)
+      • كشف الحواف (EDGE_DEF)
+      • منطق edgeLiesOnBeam و posAlongBeam
+      • تنسيق الخرج BeamEdgeForces (متوافق مع Phase 3)
+
+   الدالة: summariseStressExtraction(results, applied, stressMode)
+      • تطبع الآن ΣMx و ΣMy لكل جسر في وحدة kNm
+
+4. index.ts
+   ─────────
+   • استخراج stressMode = 'full' من النموذج
+   • تمرير stressMode إلى extractStressEdgeForces
+   • تمرير stressMode إلى summariseStressExtraction
+   • رسالة وضع التشغيل تميز الآن ثلاث حالات:
+       Phase 2 — reaction-based (K·d − F)
+       Phase 4 — stress-based shear-only (Fz)
+       Phase 5 — stress-based full (Fz + Mx + My)
+   • صادرات جديدة:
+       runCase5MomentConsistencyTest
+       Case5Report (نوع بيانات)
+
+5. validation.ts
+   ──────────────
+   أ) نوع بيانات جديد: Case5Report
+      • shearOnlyFz_kN, fullFz_kN          → مقارنة إجماليات القوى
+      • shearOnlyMxTotal_kNm, fullMxTotal_kNm → مقارنة إجماليات Mx
+      • shearOnlyMyTotal_kNm, fullMyTotal_kNm → مقارنة إجماليات My
+      • fullEquilibrium_pct               → خطأ توازن Phase 5
+      • momentTransferDetected            → هل اكتُشف نقل العزوم
+      • forceEquilibriumOk                → هل التوازن < 5%
+      • forcesConsistent                  → هل P4 ≈ P5 في القوى (< 2%)
+
+   ب) FullValidationReport موسّع: تمت إضافة case5
+
+   ج) دالة جديدة: runCase5MomentConsistencyTest(density = 4)
+      الهندسة: بلاطة 5×5 م | 4 عوارض حافية | q = 10 kN/m²
+      يُشغّل Phase 4 و Phase 5 على نفس الحل FEM.
+      معايير النجاح:
+        1. نقل العزوم: Phase4 → Mx≈0، Phase5 → Mx>1 kNm
+        2. اتساق القوى: |P5_Fz − P4_Fz| / applied < 2 %
+        3. توازن Phase 5:  |applied − P5_Fz| / applied < 5 %
+
+   د) runFullValidation() موسّع: الآن 6 اختبارات:
+        Phase 1  | Case 1 | Case 2 | Case 3 | Case 4 | Case 5
+
+───────────────────────────────────────────────────────────────
+رابعاً: ما لم يُمَسَّ (Locked Code)
+───────────────────────────────────────────────────────────────
+
+• محلول FEM (solver, assembler, mesh) — محمي تماماً
+• Phase 2 (extractBeamEdgeForces) — لم يُعدَّل
+• beamMapper.ts — لم يُعدَّل
+• LoadComparisonPanel.tsx — متوافق تلقائياً (الحقول اختيارية)
+
+───────────────────────────────────────────────────────────────
+خامساً: كيفية الاستخدام
+───────────────────────────────────────────────────────────────
+
+// Phase 5 — كامل (الافتراضي عند تفعيل useStressBasedTransfer)
+getBeamLoadsFromSlab({
+  ...model,
+  useStressBasedTransfer: true,
+  // stressMode: 'full'  ← اختياري، هو الافتراضي
+})
+
+// Phase 4 — قوة فقط (توافق عكسي مع الإصدار السابق)
+getBeamLoadsFromSlab({
+  ...model,
+  useStressBasedTransfer: true,
+  stressMode: 'shear-only',
+})
+
+// تشغيل مجموعة الاختبارات الكاملة (6 اختبارات)
+runFullValidation()
+
+// اختبار التحقق من العزوم منفرداً
+runCase5MomentConsistencyTest(4)
+
+───────────────────────────────────────────────────────────────
+سادساً: نتائج التحقق
+───────────────────────────────────────────────────────────────
+
+• TypeScript: صفر أخطاء في جميع ملفات slabFEMEngine
+• التطبيق يعمل بنجاح على المنفذ 20592
+
+═══════════════════════════════════════════════════════════════

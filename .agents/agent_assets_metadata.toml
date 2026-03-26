@@ -18,3 +18,9 @@ id = "xmPacf8F-UjiYv2FopCdv"
 uri = "file://خلاصة_Phase4.txt"
 type = "text"
 title = "خلاصة Phase 4 — Stress-Based Load Transfer"
+
+[[outputs]]
+id = "o6k8c9z0yxzAICCCZh39_"
+uri = "file://خلاصة_Phase5.txt"
+type = "text"
+title = "خلاصة Phase 5 — Full Moment-Consistent Edge Transfer"
