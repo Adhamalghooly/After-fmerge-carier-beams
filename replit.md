@@ -94,3 +94,25 @@ Generated React Query hooks and fetch client from the OpenAPI spec (e.g. `useHea
 ### `scripts` (`@workspace/scripts`)
 
 Utility scripts package. Each script is a `.ts` file in `src/` with a corresponding npm script in `package.json`. Run scripts via `pnpm --filter @workspace/scripts run <script>`. Scripts can import any workspace package (e.g., `@workspace/db`) by adding it as a dependency in `scripts/package.json`.
+
+### `artifacts/structural-design` — slabFEMEngine module
+
+Isolated add-on at `src/slabFEMEngine/`. Computes slab-to-beam load transfer via Mindlin-Reissner FEM (ETABS-style). Does NOT modify any existing analysis logic.
+
+**Module files (10):**
+- `types.ts` — all type definitions (FEMNode, FEMElement, SlabMesh, etc.)
+- `mesh.ts` — structured quad mesh generator (beam lines forced onto grid)
+- `mindlinShell.ts` — 4-node Mindlin plate element (2×2 bending, 1×1 shear)
+- `assembler.ts` — global K assembly, BC application, reaction extraction
+- `solver.ts` — Gaussian elimination with partial pivoting
+- `internalForces.ts` — Mx, My, Mxy, Qx, Qy at any point
+- `edgeForces.ts` — Phase 2: signed nodal reactions with junction splitting
+- `beamMapper.ts` — Phase 3: converts reactions to w(x) BeamLoadResult
+- `validation.ts` — Phase 1 self-test (SS slab against analytical)
+- `index.ts` — public API (`getBeamLoadsFromSlab`, `runPhase1Validation`)
+
+**Validation status:**
+- Phase 1 PASSED: equilibrium 0.0000%, moment error 10.42% (< 15%), deflection error 4.57%
+- Phase 2 PASSED: each beam receives exactly 62.50 kN on a 5×5 m / 10 kN/m² test, 0.0000% equilibrium error
+- Sign convention: reactions negative (upward). Junction nodes split 50/50. Column nodes excluded from beam loads.
+- STRICT RULE: Do NOT modify existing load distribution logic (calculateBeamLoads, buildingModel.ts, structuralEngine.ts)
