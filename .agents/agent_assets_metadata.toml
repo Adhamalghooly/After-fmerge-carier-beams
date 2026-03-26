@@ -24,3 +24,9 @@ id = "o6k8c9z0yxzAICCCZh39_"
 uri = "file://خلاصة_Phase5.txt"
 type = "text"
 title = "خلاصة Phase 5 — Full Moment-Consistent Edge Transfer"
+
+[[outputs]]
+id = "FIvbSRSMV8dTO4bDAntsg"
+uri = "file://Phase6_Summary.txt"
+type = "text"
+title = "ملخص Phase 6 — التكافؤ الدوراني"
