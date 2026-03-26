@@ -140,6 +140,34 @@ export interface SlabMomentComparison {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Coordinate scaling: app stores positions in METERS, FEM engine expects MM.
+// Only x/y position coordinates are scaled. Structural dimensions (b, h, L)
+// and beam.length are NOT scaled — beamMapper already converts beam.length×1000.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function toMmModel(model: FEMInputModel): FEMInputModel {
+  return {
+    ...model,
+    slabs: model.slabs.map(s => ({
+      ...s,
+      x1: s.x1 * 1000, y1: s.y1 * 1000,
+      x2: s.x2 * 1000, y2: s.y2 * 1000,
+    })),
+    beams: model.beams.map(b => ({
+      ...b,
+      x1: b.x1 * 1000, y1: b.y1 * 1000,
+      x2: b.x2 * 1000, y2: b.y2 * 1000,
+      // beam.length stays in METRES — beamMapper does ×1000 internally
+    })),
+    columns: model.columns.map(c => ({
+      ...c,
+      x: c.x * 1000, y: c.y * 1000,
+      // c.b, c.h, c.L are already in mm — do not scale
+    })),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Internal: shared per-slab solve (Phases 1-5)
 // Stores mesh + d_full so Phase 6 can extract rotations.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,9 +275,14 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
       : 'Phase 4 — stress-based shear-only (Fz)';
   console.log(`[slabFEMEngine] Mode: ${modeLabel}`);
 
-  const records = _solveSlabs(model, useStressBasedTransfer, stressMode, q_Nmm2);
+  // Scale coordinates m→mm for internal FEM computation
+  const mmModel = toMmModel(model);
+
+  const records = _solveSlabs(mmModel, useStressBasedTransfer, stressMode, q_Nmm2);
   const allEdgeForces: BeamEdgeForces[] = records.flatMap(r => r.edgeForces);
 
+  // Mapper receives ORIGINAL beams/slabs (beam.length in m, coords in m)
+  // so that beamLen_mm = beam.length*1000 and calculateBeamLoads work correctly
   return mapEdgeForcesToBeams(allEdgeForces, model.beams, {
     comparisonMode,
     slabs:     model.slabs,
@@ -276,7 +309,7 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
  */
 export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCouplingResult {
   const {
-    slabProps, mat, beams, slabs,
+    slabProps, mat,
     useStressBasedTransfer = true,
     stressMode             = 'full',
     useRotationalCoupling  = false,
@@ -290,9 +323,14 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
   const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
   const q_Nmm2 = q_kNm2 * 1e-3;
 
-  // Phases 1–5 per slab
+  // Scale coordinates m→mm for internal FEM computation
+  const mmModel = toMmModel(model);
+  const mmBeams = mmModel.beams;
+  const mmSlabs = mmModel.slabs;
+
+  // Phases 1–5 per slab (using mm coords)
   const records = _solveSlabs(
-    { ...model, useStressBasedTransfer, stressMode },
+    { ...mmModel, useStressBasedTransfer, stressMode },
     useStressBasedTransfer,
     stressMode,
     q_Nmm2,
@@ -309,7 +347,7 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
       `[slabFEMEngine] Phase 6 — Rotational Coupling ENABLED  (α = ${couplingAlpha})`,
     );
 
-    // Apply coupling per slab (each slab has its own mesh + d_full)
+    // Apply coupling per slab — pass mm-scaled beams so beamL_mm is correct
     const coupledEdgeForces: BeamEdgeForces[] = [];
 
     for (const record of records) {
@@ -317,7 +355,7 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
         record.mesh,
         record.d_full,
         record.edgeForces,
-        beams,
+        mmBeams,
         mat,
         couplingAlpha,
       );
@@ -327,7 +365,6 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
 
     allEdgeForces = coupledEdgeForces;
 
-    // Debug: total rotation differences
     const totalMaxDelta = allCouplingResults.reduce((s, r) => s + r.maxDeltaTheta_rad, 0);
     const totalBeams    = allCouplingResults.length;
     console.log(
@@ -335,12 +372,12 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
       `Sum max|Δθ|: ${(totalMaxDelta * 1000).toFixed(3)} mrad`,
     );
 
-    // Total applied load vs total beam loads (regression check)
+    // Equilibrium check using mm-scaled slab areas
     const totalApplied_kN = records.reduce((s, rec) => {
-      const slabObj = slabs.find(sl => sl.id === rec.mesh.slabId);
+      const slabObj = mmSlabs.find(sl => sl.id === rec.mesh.slabId);
       if (!slabObj) return s;
-      const area = Math.abs(slabObj.x2 - slabObj.x1) * Math.abs(slabObj.y2 - slabObj.y1);
-      return s + q_Nmm2 * area * 1e-3;
+      const area_mm2 = Math.abs(slabObj.x2 - slabObj.x1) * Math.abs(slabObj.y2 - slabObj.y1);
+      return s + q_Nmm2 * area_mm2 * 1e-3;
     }, 0);
     const totalBeamFz_kN = allEdgeForces.reduce((s, ef) => s + ef.totalForce_N * 1e-3, 0);
     const fzErr = totalApplied_kN > 1e-6
@@ -361,9 +398,10 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
     );
   }
 
-  const loads = mapEdgeForcesToBeams(allEdgeForces, beams, {
+  // Mapper uses ORIGINAL model beams/slabs (beam.length in m, coords in m)
+  const loads = mapEdgeForcesToBeams(allEdgeForces, model.beams, {
     comparisonMode,
-    slabs,
+    slabs:     model.slabs,
     slabProps,
     mat,
   });
@@ -378,24 +416,32 @@ export function getBeamLoadsWithCoupling(model: FEMInputModel): BeamLoadsWithCou
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function getSlabCenterMoments(model: FEMInputModel): SlabMomentComparison[] {
-  const { slabs, beams, columns, slabProps, mat, meshDensity = 4 } = model;
+  const { slabProps, mat, meshDensity = 4 } = model;
 
   const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
   const q_kNm2 = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
   const q_Nmm2 = q_kNm2 * 1e-3;
 
+  // Scale coordinates m→mm for FEM; iterate over original slabs for IDs/spans
+  const mmModel = toMmModel(model);
+  const { slabs: mmSlabs, beams: mmBeams, columns: mmColumns } = mmModel;
+
   const results: SlabMomentComparison[] = [];
 
-  for (const slab of slabs) {
-    const lx_mm = Math.min(Math.abs(slab.x2 - slab.x1), Math.abs(slab.y2 - slab.y1));
-    const ly_mm = Math.max(Math.abs(slab.x2 - slab.x1), Math.abs(slab.y2 - slab.y1));
+  for (let si = 0; si < model.slabs.length; si++) {
+    const origSlab = model.slabs[si];
+    const mmSlab   = mmSlabs[si];
+
+    // Spans from mm-scaled coords → convert to metres for output
+    const lx_mm = Math.min(Math.abs(mmSlab.x2 - mmSlab.x1), Math.abs(mmSlab.y2 - mmSlab.y1));
+    const ly_mm = Math.max(Math.abs(mmSlab.x2 - mmSlab.x1), Math.abs(mmSlab.y2 - mmSlab.y1));
     const lx_m  = lx_mm / 1000;
     const ly_m  = ly_mm / 1000;
     const beta  = Math.max(lx_m > 0 ? ly_m / lx_m : 1.0, 1.0);
     const isOneWay = beta > 2;
 
-    // ── FEM solve ────────────────────────────────────────────────────────────
-    const mesh = meshSlab(slab, beams, columns, meshDensity);
+    // ── FEM solve (mm coords) ─────────────────────────────────────────────
+    const mesh = meshSlab(mmSlab, mmBeams, mmColumns, meshDensity);
     const sys  = assembleSystem(mesh, slabProps, mat, q_Nmm2);
 
     let femMx = 0, femMy = 0, femMxy = 0;
@@ -405,9 +451,9 @@ export function getSlabCenterMoments(model: FEMInputModel): SlabMomentComparison
       const d_full = reconstructDisplacements(solveResult.d, sys.freeDOFs, sys.nDOF);
       const forceResults = computeInternalForces(mesh, d_full, slabProps, mat);
 
-      // Center of slab (mm)
-      const cx_mm = (slab.x1 + slab.x2) / 2;
-      const cy_mm = (slab.y1 + slab.y2) / 2;
+      // Center in mm (use scaled slab coords)
+      const cx_mm = (mmSlab.x1 + mmSlab.x2) / 2;
+      const cy_mm = (mmSlab.y1 + mmSlab.y2) / 2;
 
       // Find nearest Gauss-point result to the slab centre
       let minDist = Infinity;
@@ -423,7 +469,7 @@ export function getSlabCenterMoments(model: FEMInputModel): SlabMomentComparison
     }
 
     results.push({
-      slabId: slab.id,
+      slabId: origSlab.id,
       lx_m, ly_m, beta, isOneWay,
       fem: { Mx: Math.abs(femMx), My: Math.abs(femMy), Mxy: Math.abs(femMxy) },
     });
