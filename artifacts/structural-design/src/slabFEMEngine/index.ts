@@ -485,3 +485,92 @@ export function getSlabCenterMoments(model: FEMInputModel): SlabMomentComparison
 export function validatePhase1(meshDensity?: number): ValidationReport {
   return runPhase1Validation(meshDensity);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 7 — Full Coupled Beam-Slab FEM (new public API)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type {
+  CoupledResult,
+  CoupledBeamResult,
+  CoupledBeamEndForces,
+  CoupledSlabResults,
+  CoupledEquilibrium,
+  CoupledDebugInfo,
+} from './coupledSystem';
+
+export type {
+  Phase7TestResult,
+  Phase7Report,
+} from './phase7Validation';
+
+export { runPhase7Validation } from './phase7Validation';
+
+import { solveCoupledSystem } from './coupledSystem';
+import type { CoupledResult }  from './coupledSystem';
+
+/**
+ * getCoupledBeamSlabResults
+ * ─────────────────────────
+ * Phase 7 public entry point: full monolithic coupled FEM where
+ * the slab and all beams are solved simultaneously in ONE system.
+ *
+ * Unlike Phases 1–6 (sequential slab→beam transfer), Phase 7 assembles a
+ * single global stiffness matrix that includes both slab Mindlin-Reissner
+ * shell elements and 3D Euler-Bernoulli beam frame elements.
+ * Beam–slab compatibility is enforced via penalty constraints.
+ *
+ * Input model coordinates are in METRES (same as the rest of the app).
+ * Internal computation is in mm/N/rad.  Output is in kN/kN·m.
+ *
+ * @param model          FEM input model (coordinates in metres)
+ * @param meshDensity    Mesh divisions per metre (default 2; use 3 for finer mesh)
+ * @param penaltyMult    Penalty multiplier on max K_diagonal (default 1e4)
+ * @returns CoupledResult with beam forces, slab deflections, and equilibrium info
+ *
+ * @performance  Dense O(n³) Gaussian solver.  Approx timing vs meshDensity:
+ *   density=2 →  ~627 DOF → < 5 s
+ *   density=3 → ~1100 DOF → ~15 s
+ */
+export function getCoupledBeamSlabResults(
+  model:        FEMInputModel,
+  meshDensity   = 2,
+  penaltyMult   = 1e4,
+): CoupledResult[] {
+  const { slabProps, mat } = model;
+
+  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
+  const q_kNm2  = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
+  const q_Nmm2  = q_kNm2 * 1e-3;
+
+  // Scale coordinates m → mm (same convention as the rest of the engine)
+  const mm = toMmModel(model);
+
+  const results: CoupledResult[] = [];
+
+  for (const slab of mm.slabs) {
+    // Only include beams that serve this slab
+    const slabBeams = mm.beams.filter(b => b.slabs.includes(slab.id));
+    if (slabBeams.length === 0) {
+      console.warn(`[Phase7] Slab ${slab.id} has no associated beams — skipping.`);
+      continue;
+    }
+
+    console.log(
+      `[Phase7] Solving slab ${slab.id}  ` +
+      `(${(Math.abs(slab.x2 - slab.x1) / 1000).toFixed(1)} × ` +
+      `${(Math.abs(slab.y2 - slab.y1) / 1000).toFixed(1)} m)  ` +
+      `${slabBeams.length} beams  meshDensity=${meshDensity}`,
+    );
+
+    const result = solveCoupledSystem(
+      slab, slabBeams, mm.columns,
+      slabProps, mat, q_Nmm2,
+      meshDensity, penaltyMult,
+    );
+
+    results.push(result);
+  }
+
+  return results;
+}

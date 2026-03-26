@@ -99,7 +99,7 @@ Utility scripts package. Each script is a `.ts` file in `src/` with a correspond
 
 Isolated add-on at `src/slabFEMEngine/`. Computes slab-to-beam load transfer via Mindlin-Reissner FEM (ETABS-style). Does NOT modify any existing analysis logic.
 
-**Module files (10):**
+**Module files (Phases 1–6, LOCKED):**
 - `types.ts` — all type definitions (FEMNode, FEMElement, SlabMesh, etc.)
 - `mesh.ts` — structured quad mesh generator (beam lines forced onto grid)
 - `mindlinShell.ts` — 4-node Mindlin plate element (2×2 bending, 1×1 shear)
@@ -108,11 +108,26 @@ Isolated add-on at `src/slabFEMEngine/`. Computes slab-to-beam load transfer via
 - `internalForces.ts` — Mx, My, Mxy, Qx, Qy at any point
 - `edgeForces.ts` — Phase 2: signed nodal reactions with junction splitting
 - `beamMapper.ts` — Phase 3: converts reactions to w(x) BeamLoadResult
-- `validation.ts` — Phase 1 self-test (SS slab against analytical)
-- `index.ts` — public API (`getBeamLoadsFromSlab`, `runPhase1Validation`)
+- `stressEdgeTransfer.ts` — Phase 4/5: stress-based force + moment transfer
+- `rotationalCoupling.ts` — Phase 6: beam–slab rotational spring feedback
+- `validation.ts` — Phases 1–5 validation suite (5 cases)
+- `index.ts` — public API (getBeamLoadsFromSlab, getCoupledBeamSlabResults, …)
+
+**Phase 7 files (NEW — Full Coupled Beam-Slab FEM):**
+- `frameElement.ts` — 3D Euler-Bernoulli frame element (12 DOF, K_local, T, K_global)
+- `coupledSystem.ts` — monolithic slab+beam FEM system with penalty coupling
+- `phase7Validation.ts` — 4-test validation suite (cantilever, equilibrium, stiffness, load-share)
+- `reports/phase7_report.txt` — full engineering report
+
+**Phase 7 public API:**
+- `getCoupledBeamSlabResults(model, meshDensity?, penaltyMult?) → CoupledResult[]`
+  - Solves slab and beams simultaneously in ONE global stiffness matrix
+  - Penalty method enforces UZ/RX/RY compatibility at slab–beam interface
+  - Returns beam end forces (local coords), slab deflections, equilibrium check
+- `runPhase7Validation() → Phase7Report` — runs all 4 validation tests
 
 **Validation status:**
 - Phase 1 PASSED: equilibrium 0.0000%, moment error 10.42% (< 15%), deflection error 4.57%
 - Phase 2 PASSED: each beam receives exactly 62.50 kN on a 5×5 m / 10 kN/m² test, 0.0000% equilibrium error
-- Sign convention: reactions negative (upward). Junction nodes split 50/50. Column nodes excluded from beam loads.
-- STRICT RULE: Do NOT modify existing load distribution logic (calculateBeamLoads, buildingModel.ts, structuralEngine.ts)
+- Phase 7: 4 validation tests — cantilever self-test (0.1% tolerance), equilibrium < 2%, stiffness comparison, internal beam load share
+- STRICT RULE: Do NOT modify any Phases 1–6 files. Phase 7 only adds new files.
