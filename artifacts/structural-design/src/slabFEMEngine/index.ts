@@ -12,7 +12,7 @@
  *     Full FEM-based slab-to-beam load transfer.
  *     Phase 1: mesh + solve + internal forces.
  *     Phase 2: edge force extraction.
- *     Phase 3: beam load distribution w(x).
+ *     Phase 3: beam load distribution w(x), force-conservative.
  *
  *   getSlabCenterMoments(model)   → SlabMomentComparison[]
  *     FEM center Mx/My for each slab (for comparison UI).
@@ -20,6 +20,17 @@
  *   runPhase1Validation()         → ValidationReport
  *     Self-contained simply-supported slab test.
  *     Must pass before any production use.
+ *
+ *   runCase1Regression()          → { passed, equilibriumError_pct, notes }
+ *     Phase 2+3 regression: 5×5 m slab, 4 edge beams, q=10 kN/m².
+ *     Sum of beam loads must equal total applied load within 5 %.
+ *
+ *   runCase2Validation()          → Case2Report
+ *     NEW: 6×6 m slab with internal beam at mid-span.
+ *     Validates non-uniform load distribution and stiffness-based transfer.
+ *
+ *   runFullValidation()           → FullValidationReport
+ *     Runs Phase 1 + Case 1 + Case 2 and returns combined report.
  *
  * ── Integration hook ────────────────────────────────────────
  *
@@ -29,6 +40,12 @@
  * ── Unit conventions ────────────────────────────────────────
  *   Internal computation: mm, N, rad.
  *   All OUTPUT values:    kN, m, kN/m, kN·m/m  (engineering units).
+ *
+ * ── Force conservation ──────────────────────────────────────
+ *   Phase 3 normalizes the w(x) profile so that:
+ *     ∫ w(x) dx  =  Σ F_i  (exact FEM nodal forces)
+ *   The normalization scale factor is within 1–3 % of unity for meshes
+ *   with ≥ 4 divisions/m.  A console warning is emitted if it exceeds 5 %.
  */
 
 export type {
@@ -49,9 +66,23 @@ import { solve } from './solver';
 import { computeInternalForces } from './internalForces';
 import { extractBeamEdgeForces, validatePhase2 } from './edgeForces';
 import { mapEdgeForcesToBeams } from './beamMapper';
-import { runPhase1Validation } from './validation';
+import {
+  runPhase1Validation,
+  runCase1Regression,
+  runCase2Validation,
+  runFullValidation,
+  assertPhase1Valid,
+} from './validation';
 
-export { runPhase1Validation };
+export type { Case2Report, Case2BeamResult, FullValidationReport } from './validation';
+
+export {
+  runPhase1Validation,
+  runCase1Regression,
+  runCase2Validation,
+  runFullValidation,
+  assertPhase1Valid,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Slab moment comparison type (FEM center moments)
@@ -155,7 +186,7 @@ export function getBeamLoadsFromSlab(model: FEMInputModel): BeamLoadResult[] {
     allEdgeForces.push(...edgeForces);
   }
 
-  // ── Phase 3: map to beams ─────────────────────────────────────────────────
+  // ── Phase 3: map to beams (force-conservative) ────────────────────────────
   const beamLoads = mapEdgeForcesToBeams(allEdgeForces, beams, {
     comparisonMode,
     slabs,
