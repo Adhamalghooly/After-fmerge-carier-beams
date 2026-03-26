@@ -240,21 +240,30 @@ const FEMComparisonPanel: React.FC<Props> = ({
       // Span
       const L = beam.length;   // metres
 
-      // 3D avg load (kN/m): DL + LL from tributary method
-      let load3D = 0;
-      if (td?.oldMethodLoad) {
-        load3D = td.oldMethodLoad.deadLoad + td.oldMethodLoad.liveLoad;
-      } else if (td?.femMethodLoad) {
-        load3D = td.femMethodLoad.avgLoad;
+      // 3D avg load (kN/m): use pre-computed tributary loads already on the beam
+      // (beam.deadLoad + beam.liveLoad come from calculateBeamLoads in the main
+      // app, which implements the standard tributary area / 3D-method distribution).
+      // Fall back to getBeamLoadsFromSlab optional fields if available.
+      let load3D = beam.deadLoad + beam.liveLoad;
+      if (load3D < 1e-6) {
+        if (td?.oldMethodLoad) {
+          load3D = td.oldMethodLoad.deadLoad + td.oldMethodLoad.liveLoad;
+        } else if (td?.femMethodLoad) {
+          load3D = td.femMethodLoad.avgLoad;
+        }
       }
 
-      // Phase 8 avg load estimate from shear profile
-      // Approximation: w_avg = (V_start + V_end) / L
-      // elementShears_kN = [Vz1_0, Vz2_0, Vz1_1, Vz2_1, ...]
+      // Phase 8 avg load from shear profile:
+      //   w_avg = Total vertical force / L
+      //   Total vertical force = V_start (left support) + V_end (right support)
+      //   elementShears_kN = [|Vz1_e0|, |Vz2_e0|, |Vz1_e1|, |Vz2_e1|, ...]
+      //   sh[0]  = left-end shear of first element  = left reaction
+      //   sh[last] = right-end shear of last element = right reaction
       const sh = p8.elementShears_kN;
       const vStart = sh.length > 0 ? sh[0] : 0;
       const vEnd   = sh.length > 1 ? sh[sh.length - 1] : vStart;
-      const loadP8 = L > 1e-6 ? (vStart + vEnd) / L : 0;
+      const totalForceP8 = vStart + vEnd;    // kN — sum of support reactions
+      const loadP8 = L > 1e-6 ? totalForceP8 / L : 0;
 
       // diff
       const diffPct = load3D > 1e-6 ? (loadP8 - load3D) / load3D * 100 : 0;

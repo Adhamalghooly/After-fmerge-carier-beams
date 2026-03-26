@@ -231,7 +231,10 @@ export function solveMergedDOFSystem(
       sharedNodeMap.set(ni, {
         slabNodeIdx:  ni,
         beamBlockIdx: beamBlockIdx++,
-        isFixed:      nd.isFixed,
+        // Phase 8: only fix extra beam DOFs at actual column positions.
+        // Regular beam-line nodes are elastic — their stiffness comes from
+        // the assembled beam elements, not from a rigid zero-displacement BC.
+        isFixed:      nd.atColumn,
       });
     }
   }
@@ -342,11 +345,17 @@ export function solveMergedDOFSystem(
 
   const fixedDOFs = new Set<number>();
 
-  // a) Slab fixed nodes (column positions) — fix UZ, RX, RY
-  //    Because these slab DOFs are MERGED with beam UZ/RX/RY, fixing them
-  //    automatically fixes the beam's vertical + rotational DOFs at columns.
+  // a) Slab node BCs for Phase 8:
+  //    - Column nodes (atColumn) → fully fixed (UZ, RX, RY = 0): true structural supports.
+  //    - Non-beam boundary nodes (onBoundary but not on a beam) → also fixed
+  //      (free slab edge without a beam is pinned against vertical displacement).
+  //    - Beam-line nodes that are NOT at a column → NOT fixed here.
+  //      Their stiffness contribution comes from the assembled beam elements (step 5).
+  //      Forcing them to zero would zero out all beam forces (the Phase 8 zero-value bug).
   for (let ni = 0; ni < nSlab; ni++) {
-    if (nodes[ni].isFixed) {
+    const nd = nodes[ni];
+    const isRigidBC = nd.atColumn || (nd.isFixed && nd.beamId === null);
+    if (isRigidBC) {
       fixedDOFs.add(ni * 3 + 0);   // UZ
       fixedDOFs.add(ni * 3 + 1);   // RX
       fixedDOFs.add(ni * 3 + 2);   // RY
