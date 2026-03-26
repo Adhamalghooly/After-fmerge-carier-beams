@@ -164,3 +164,27 @@ Isolated add-on at `src/slabFEMEngine/`. Computes slab-to-beam load transfer via
 - Phase 7: 4 validation tests — cantilever self-test (0.1% tolerance), equilibrium < 2%, stiffness comparison, internal beam load share
 - Phase 9: 4 validation tests — dense/sparse agreement < 1%, large-model scalability, performance benchmark, CG convergence < 10⁻¹⁰
 - STRICT RULE: Do NOT modify any Phases 1–6 files. Phase 7+ only adds new files.
+
+## Analysis Engine Switching System
+
+**Key files:**
+- `src/lib/analysisController.ts` — EngineType, ENGINE_LABELS, adaptLegacyResults(), adaptFEMResults()
+- `src/pages/indexReducer.ts` — AppState.selectedEngine, SET_ENGINE action
+- `src/pages/Index.tsx` — engine dropdown UI, runAnalysis() dual-path routing
+
+**Architecture:** UI → Controller (runAnalysis) → Engine → Adapter → FrameResult[] → Renderer
+
+**Canonical format:** FrameResult[] (unchanged from legacy) — all downstream rendering code unmodified.
+
+**Engines:**
+- `legacy_3d` (default): getFrameResults3D() via 3D stiffness frame analysis
+- `fem_coupled`: getCoupledBeamSlabResults() via Phase-7 Coupled Beam–Slab FEM
+
+**FEM Adapter mapping (adaptFEMResults):**
+- Accumulates CoupledBeamResult across all slab solves (internal beams get contributions from both adjacent slabs)
+- My1/My2 (N·mm ÷ 1e6) → Mleft/Mright (kN·m)
+- Max positive central element moment → Mmid (kN·m)
+- maxShear_kN envelope → Vu (kN)
+- |Vz1|/|Vz2| (N ÷ 1000) → Rleft/Rright (kN)
+
+**Report:** `analysis-engine-switching-report.txt` (full architecture + comparison + observations)

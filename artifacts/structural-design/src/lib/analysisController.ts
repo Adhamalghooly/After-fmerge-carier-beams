@@ -1,0 +1,163 @@
+/**
+ * Analysis Engine Switching System
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Architecture:  UI  →  Controller  →  Engine  →  Adapter  →  FrameResult[]  →  Renderer
+ *
+ * The canonical unified format is the existing FrameResult[] so that ALL
+ * downstream rendering (AnalysisDiagramDialog, beam design, export) remains
+ * completely unchanged.
+ *
+ * Two engines are supported:
+ *   • legacy_3d   – 3D stiffness frame analysis (getFrameResults3D)
+ *   • fem_coupled – Phase-7 Coupled Beam–Slab FEM (getCoupledBeamSlabResults)
+ *
+ * Unit conventions:
+ *   FEM end forces    →  N  and  N·mm  (internal)
+ *   FEM element data  →  kN  and  kN·m  (already converted by the engine)
+ *   FrameResult       →  kN  and  kN·m  (target canonical format)
+ */
+
+import type { Beam, Frame, FrameResult }    from '@/lib/structuralEngine';
+import type { CoupledResult }               from '@/slabFEMEngine/coupledSystem';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine type identifier
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type EngineType = 'legacy_3d' | 'fem_coupled';
+
+export const ENGINE_LABELS: Record<EngineType, string> = {
+  legacy_3d:   '3D (Legacy)',
+  fem_coupled: 'FEM (Coupled)',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADAPTER: Legacy → Unified
+// The legacy engine already returns FrameResult[], so this is a pass-through.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function adaptLegacyResults(legacyResults: FrameResult[]): FrameResult[] {
+  return legacyResults;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADAPTER: FEM CoupledResult[] → FrameResult[]
+//
+// Mapping table:
+//   CoupledBeamResult field           → FrameResult beam field
+//   ─────────────────────────────────────────────────────────
+//   endForcesLocal.My1 (N·mm ÷ 1e6)  → Mleft  (kN·m, signed)
+//   endForcesLocal.My2 (N·mm ÷ 1e6)  → Mright (kN·m, signed)
+//   max positive central element moment → Mmid  (kN·m, positive sagging)
+//   maxShear_kN                        → Vu    (kN, absolute)
+//   |endForcesLocal.Vz1| (N ÷ 1000)   → Rleft  (kN, positive)
+//   |endForcesLocal.Vz2| (N ÷ 1000)   → Rright (kN, positive)
+//
+// Internal beams are shared across ≥2 slab solves; forces are accumulated
+// element-wise (summed) mirroring the ETABS accumulation strategy used in
+// FEMComparisonPanel.  maxShear uses Math.max (envelope).
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface BeamAccumulator {
+  elementMoments: number[];  // kN·m, accumulated from all slab solves
+  elementShears:  number[];  // kN,   accumulated from all slab solves
+  maxMoment:  number;        // kN·m, envelope max across slab solves
+  maxShear:   number;        // kN,   envelope max across slab solves
+  My1_Nmm:    number;        // N·mm, accumulated end moment at start node
+  My2_Nmm:    number;        // N·mm, accumulated end moment at end node
+  Vz1_N:      number;        // N,    accumulated shear at start node
+  Vz2_N:      number;        // N,    accumulated shear at end node
+}
+
+export function adaptFEMResults(
+  coupledResults: CoupledResult[],
+  beams: Beam[],
+  frames: Frame[],
+): FrameResult[] {
+
+  // ── 1. Accumulate forces across all per-slab solves ──────────────────────
+  const acc = new Map<string, BeamAccumulator>();
+
+  for (const slabResult of coupledResults) {
+    for (const br of slabResult.beamResults) {
+      const existing = acc.get(br.beamId);
+      if (!existing) {
+        acc.set(br.beamId, {
+          elementMoments: [...br.elementMoments_kNm],
+          elementShears:  [...br.elementShears_kN],
+          maxMoment: br.maxMoment_kNm,
+          maxShear:  br.maxShear_kN,
+          My1_Nmm:   br.endForcesLocal.My1,
+          My2_Nmm:   br.endForcesLocal.My2,
+          Vz1_N:     br.endForcesLocal.Vz1,
+          Vz2_N:     br.endForcesLocal.Vz2,
+        });
+      } else {
+        // Add element-wise spatial contributions from this slab
+        const len = Math.min(existing.elementMoments.length, br.elementMoments_kNm.length);
+        for (let i = 0; i < len; i++) {
+          existing.elementMoments[i] += br.elementMoments_kNm[i];
+          existing.elementShears[i]  += br.elementShears_kN[i];
+        }
+        // Envelope the scalar peaks
+        existing.maxMoment = Math.max(existing.maxMoment, br.maxMoment_kNm);
+        existing.maxShear  = Math.max(existing.maxShear,  br.maxShear_kN);
+        // Accumulate support forces
+        existing.My1_Nmm += br.endForcesLocal.My1;
+        existing.My2_Nmm += br.endForcesLocal.My2;
+        existing.Vz1_N   += br.endForcesLocal.Vz1;
+        existing.Vz2_N   += br.endForcesLocal.Vz2;
+      }
+    }
+  }
+
+  // ── 2. Map frames → FrameResult[] ────────────────────────────────────────
+  return frames.map(frame => ({
+    frameId: frame.id,
+    beams: frame.beamIds.map(beamId => {
+      const beam = beams.find(b => b.id === beamId);
+      const a    = acc.get(beamId);
+
+      // Beam not in any FEM slab solve — return zeroed result
+      if (!beam || !a) {
+        return {
+          beamId,
+          span:   beam?.length ?? 0,
+          Mleft:  0,
+          Mmid:   0,
+          Mright: 0,
+          Vu:     0,
+          Rleft:  0,
+          Rright: 0,
+        };
+      }
+
+      const n = a.elementMoments.length;
+
+      // ── End moments (N·mm → kN·m) ────────────────────────────────────────
+      const Mleft  = a.My1_Nmm / 1e6;
+      const Mright = a.My2_Nmm / 1e6;
+
+      // ── Midspan moment: max positive value in the central 50% of elements ─
+      // This gives the sagging (positive) design moment for bottom steel.
+      // Fall back to the absolute peak if the central region is fully hogging.
+      let Mmid = 0;
+      if (n > 0) {
+        const lo = Math.floor(n * 0.25);
+        const hi = Math.ceil(n * 0.75);
+        const central = a.elementMoments.slice(lo, hi);
+        const maxCentral = central.length > 0 ? Math.max(...central) : -Infinity;
+        Mmid = maxCentral > 0 ? maxCentral : a.maxMoment;
+      } else {
+        Mmid = a.maxMoment;
+      }
+
+      // ── Shear and reactions ───────────────────────────────────────────────
+      const Vu     = a.maxShear;
+      const Rleft  = Math.abs(a.Vz1_N) / 1000;   // N → kN
+      const Rright = Math.abs(a.Vz2_N) / 1000;   // N → kN
+
+      return { beamId, span: beam.length, Mleft, Mmid, Mright, Vu, Rleft, Rright };
+    }),
+  }));
+}

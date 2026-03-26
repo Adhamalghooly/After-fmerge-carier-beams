@@ -19,6 +19,8 @@ import {
   getJointConnectivityInfo, JointConnectivityInfo,
 } from "@/lib/structuralEngine";
 import { getColumnLoads3D, getFrameResults3D } from "@/lib/analyze3DColumns";
+import { adaptFEMResults, ENGINE_LABELS, type EngineType } from "@/lib/analysisController";
+import { getCoupledBeamSlabResults } from "@/slabFEMEngine";
 import { ModelManager } from "@/structural/model/modelManager";
 import { generateStructureFromSlabs } from "@/structural/generators/slabStructureGenerator";
 import ToolPalette, { ToolType } from "@/components/ToolPalette";
@@ -98,7 +100,7 @@ const Index = () => {
   const {
     stories, selectedStoryId,
     slabs, mat, slabProps, beamB, beamH, colB, colH, colL, colLBelow, colTopEndCondition, colBottomEndCondition,
-    analyzed, frameResults, bobConnections,
+    analyzed, frameResults, bobConnections, selectedEngine,
     activeTab, mode, activeTool, pendingNode,
     selectedNodeId, selectedFrameId, selectedAreaId,
     removedColumnIds, removedBeamIds, beamOverrides, colOverrides, slabPropsOverrides, extraBeams, extraColumns, supportRestraints, frameEndReleases,
@@ -113,6 +115,9 @@ const Index = () => {
 
   // Duplicate check state
   const [dupCheckResult, setDupCheckResult] = React.useState<{ message: string; count: number; items: string[] } | null>(null);
+
+  // FEM analysis error state
+  const [femError, setFemError] = React.useState<string | null>(null);
 
   // Modeler elevation filter state
   const [modelerElevation, setModelerElevation] = React.useState<number>(0);
@@ -357,6 +362,45 @@ const Index = () => {
   }, [beamsWithLoads, columns, removedColumnIds]);
 
   const runAnalysis = () => {
+    setFemError(null);
+
+    // ── FEM (Coupled Beam–Slab) engine path ─────────────────────────────────
+    if (selectedEngine === 'fem_coupled') {
+      if (slabs.length === 0) {
+        setFemError('يتطلب محرك FEM وجود بلاطات معرّفة في النموذج');
+        return;
+      }
+      if (columns.length === 0) {
+        setFemError('يتطلب محرك FEM وجود أعمدة (ركائز) في النموذج');
+        return;
+      }
+      try {
+        const femModel = {
+          slabs,
+          beams: beamsWithLoads,
+          columns,
+          slabProps,
+          mat,
+          meshDensity: 2,
+        };
+        const coupledResults = getCoupledBeamSlabResults(femModel, 2);
+        if (coupledResults.length === 0) {
+          setFemError('لم يُنتج محرك FEM نتائج — تحقق من إعدادات النموذج');
+          return;
+        }
+        const femFrameResults = adaptFEMResults(coupledResults, beamsWithLoads, frames);
+        dispatch({ type: 'SET_FRAME_RESULTS', results: femFrameResults });
+        dispatch({ type: 'SET_BOB_CONNECTIONS', connections: [] });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'خطأ غير معروف في محرك FEM';
+        setFemError(`فشل تحليل FEM: ${msg}`);
+        return;
+      }
+      dispatch({ type: 'SET_ANALYZED', value: true });
+      return;
+    }
+
+    // ── Legacy 3D engine path ────────────────────────────────────────────────
     const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
     if (removedColumnIds.length > 0 && detectedConnections.length > 0) {
       // Auto-set moment releases for secondary (carried) beams at the connection point
@@ -367,7 +411,6 @@ const Index = () => {
           if (!beam) continue;
           const isAtStart = beam.fromCol === conn.removedColumnId;
           const posKey = getBeamReleaseKey(beam);
-          // Set rz (moment about Z) release at the end connecting to the carrier beam
           const nodeIRelease = isAtStart
             ? { ux: false, uy: false, uz: false, rx: false, ry: false, rz: true }
             : { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false };
@@ -1640,6 +1683,44 @@ const Index = () => {
                 <TabsTrigger value="analysis-fem-compare" className="text-[11px] gap-1 min-h-[36px] text-emerald-600 dark:text-emerald-400"><BarChart3 size={12} />Comparison</TabsTrigger>
               </TabsList>
               <TabsContent value="analysis-main" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+            {/* ── Analysis Engine Selector ──────────────────────────────── */}
+            <Card className="mb-3 border-blue-200 dark:border-blue-800 bg-blue-500/5">
+              <CardContent className="py-3 px-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <Zap size={14} className="text-blue-500 shrink-0" />
+                  <span className="text-xs font-semibold text-foreground">محرك التحليل</span>
+                  <select
+                    className="h-8 rounded border border-input bg-background px-2 text-xs flex-1 min-w-[160px] max-w-[240px]"
+                    value={selectedEngine}
+                    onChange={e => {
+                      dispatch({ type: 'SET_ENGINE', engine: e.target.value as EngineType });
+                      setFemError(null);
+                    }}
+                  >
+                    <option value="legacy_3d">3D (Legacy) — إطارات ثلاثية الأبعاد</option>
+                    <option value="fem_coupled">FEM (Coupled) — جسور-بلاطات مقترن</option>
+                  </select>
+                  <Badge
+                    className={`text-[10px] shrink-0 ${selectedEngine === 'fem_coupled'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-400/40'
+                      : 'bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-400/40'}`}
+                  >
+                    {ENGINE_LABELS[selectedEngine]}
+                  </Badge>
+                  {selectedEngine === 'fem_coupled' && (
+                    <span className="text-[10px] text-muted-foreground">
+                      يتطلب وجود بلاطات وأعمدة — يستغرق وقتاً أطول
+                    </span>
+                  )}
+                </div>
+                {femError && (
+                  <div className="mt-2 rounded-md bg-destructive/10 border border-destructive/30 px-3 py-2 text-xs text-destructive">
+                    ⚠️ {femError}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
             {/* Duplicate Check Card - always visible */}
             <Card className="mb-3 border-orange-200 dark:border-orange-800">
               <CardHeader className="pb-2">
