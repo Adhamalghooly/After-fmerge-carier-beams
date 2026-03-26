@@ -1,0 +1,132 @@
+============================================================
+  slabFEMEngine — Development Report
+  Phase 1 & Phase 2 Validation
+============================================================
+
+WHAT WAS DONE
+-------------
+Goal: Fix Phase 2 edge force extraction, which was producing
+      ~3,473 kN total instead of the expected 250 kN (~14x error).
+
+Root Cause:
+  The original approach integrated Mindlin shear stresses (Qx, Qy)
+  along element boundary edges. Standard Mindlin quad elements produce
+  spurious shear oscillations at element edges — a known locking
+  artefact — giving values 14x too large at boundary Gauss points.
+
+Fix Applied:
+  Replaced stress integrals with exact nodal reactions.
+
+  Formula:
+    R_i = K * d - F_applied    (at each fixed support node i)
+
+  This is mathematically exact. No approximation beyond the FEM mesh.
+
+  Additional fix — Junction Splitting:
+    Where two beams meet at a corner, the plate produces a "corner
+    force" (the slab tends to lift at corners — classical Kirchhoff
+    plate effect). The corner node reaction is split 50/50 between
+    the two beams meeting there. Without this the total was 313 kN
+    instead of 250 kN.
+
+  Additional fix — Column Node Tracking:
+    Added atColumn flag to mesh nodes. Column nodes are excluded from
+    beam load summation (their reaction goes to the column directly).
+
+FILES CHANGED
+-------------
+  types.ts       — added atColumn: boolean to FEMNode
+  mesh.ts        — exposes atColumn on each node; fixes beam-line
+                   nodes (including interior beams) so reactions can
+                   always be extracted
+  edgeForces.ts  — complete rewrite: signed nodal reactions +
+                   junction splitting
+  beamMapper.ts  — updated to use new reactions structure from Phase 2
+  index.ts       — passes beams list to Phase 2; fixed equilibrium
+                   sign check
+  validation.ts  — fixed equilibrium sign check (Math.abs on sum)
+
+============================================================
+  TEST RESULTS
+============================================================
+
+TEST SETUP
+  Slab:    5 m x 5 m, simply supported on all 4 edges
+  Load:    q = 10 kN/m² uniform pressure
+  Mesh:    6 x 6 Mindlin-Reissner quad elements (36 elements)
+  Section: t = 150 mm, fc = 25 MPa, Ec = 23,500 MPa, nu = 0.2
+  Beams:   4 perimeter beams (bottom, top, left, right)
+  Columns: none (junction nodes split 50/50)
+
+------------------------------------------------------------
+PHASE 1 — FEM Solve vs. Analytical (Timoshenko & W-K)
+------------------------------------------------------------
+
+  Equilibrium Check
+    Total applied load :  250.00 kN
+    Total reactions    :  250.00 kN
+    Error              :  0.0000 %     THRESHOLD < 1%    PASS
+
+  Centre Moment Check
+    FEM Mx, My         : -10.728 kN.m/m each
+    FEM average |M|    :  10.728 kN.m/m
+    Analytical (0479qL^2):  11.975 kN.m/m
+    Error              :  10.42 %      THRESHOLD < 15%   PASS
+
+  Centre Deflection
+    FEM                :  3.854 mm
+    Analytical         :  3.686 mm
+    Error              :  4.57 %       (informational)
+
+  PHASE 1 RESULT: PASSED
+
+------------------------------------------------------------
+PHASE 2 — Edge Force Extraction (Beam Load Distribution)
+------------------------------------------------------------
+
+  Per-Beam Results
+    Bottom beam (y=0m) :  62.50 kN    expected 62.50 kN   error 0.0000%
+    Top beam    (y=5m) :  62.50 kN    expected 62.50 kN   error 0.0000%
+    Left beam   (x=0m) :  62.50 kN    expected 62.50 kN   error 0.0000%
+    Right beam  (x=5m) :  62.50 kN    expected 62.50 kN   error 0.0000%
+    Total              : 250.00 kN    expected 250.00 kN  error 0.0000%
+
+  THRESHOLD < 1%    PHASE 2 RESULT: PASSED
+
+  w(x) Distributed Load Profile — Bottom Beam
+    x=0.00m :  w = -9.52 kN/m   (corner junction, plate uplift)
+    x=0.83m :  w =  9.36 kN/m
+    x=1.67m :  w = 23.51 kN/m   (peak near third-span)
+    x=2.50m :  w = 18.79 kN/m   (midspan)
+    x=3.33m :  w = 23.51 kN/m   (symmetric)
+    x=4.17m :  w =  9.36 kN/m
+    x=5.00m :  w = -9.52 kN/m   (corner junction, plate uplift)
+    Total   :  62.50 kN          EXACT
+
+  Notes on w(x) shape:
+    - Symmetric about midspan (correct for square slab + UDL)
+    - Peaks near x = L/3 (consistent with two-way slab shear flow)
+    - Negative values at corners = corner force effect (plate lifts
+      at corners; beam must hold it down — connection design governs)
+    - For comparison, a simple tributary UDL would give uniform
+      w = 12.50 kN/m throughout (no variation)
+
+------------------------------------------------------------
+SIGN CONVENTION
+------------------------------------------------------------
+  R_i < 0  ->  support pushes slab UP  (beam carries downward load)
+  R_i > 0  ->  corner force, plate lifts (tie-down, not gravity load)
+  Output w(x): positive = downward load on beam (engineering sign)
+
+------------------------------------------------------------
+TypeScript: 0 errors in slabFEMEngine module
+App status: Running (Vite dev server, port 20592)
+------------------------------------------------------------
+
+PHASE 3 STATUS
+  Phase 3 (mapEdgeForcesToBeams -> BeamLoadResult[]) is now
+  unblocked. The BeamEdgeForces output from Phase 2 feeds
+  directly into beamMapper.ts which produces the final
+  distributed load profile for each beam.
+
+============================================================
