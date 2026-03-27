@@ -20,7 +20,7 @@ import {
 } from "@/lib/structuralEngine";
 import { getColumnLoads3D, getFrameResults3D } from "@/lib/analyze3DColumns";
 import { adaptFEMResults, ENGINE_LABELS, type EngineType } from "@/lib/analysisController";
-import { getCoupledBeamSlabResults } from "@/slabFEMEngine";
+import { getMergedBeamSlabResults } from "@/slabFEMEngine";
 import { ModelManager } from "@/structural/model/modelManager";
 import { generateStructureFromSlabs } from "@/structural/generators/slabStructureGenerator";
 import ToolPalette, { ToolType } from "@/components/ToolPalette";
@@ -383,7 +383,7 @@ const Index = () => {
           mat,
           meshDensity: 2,
         };
-        const coupledResults = getCoupledBeamSlabResults(femModel, 2);
+        const coupledResults = getMergedBeamSlabResults(femModel, 2);
         if (coupledResults.length === 0) {
           setFemError('لم يُنتج محرك FEM نتائج — تحقق من إعدادات النموذج');
           return;

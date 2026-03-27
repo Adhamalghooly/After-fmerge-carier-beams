@@ -18,7 +18,7 @@
  */
 
 import type { Beam, Frame, FrameResult }    from '@/lib/structuralEngine';
-import type { CoupledResult }               from '@/slabFEMEngine/coupledSystem';
+import type { MergedResult }               from '@/slabFEMEngine/mergedDOFSystem';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Engine type identifier
@@ -41,21 +41,27 @@ export function adaptLegacyResults(legacyResults: FrameResult[]): FrameResult[] 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ADAPTER: FEM CoupledResult[] → FrameResult[]
+// ADAPTER: FEM MergedResult[] (Phase 8) → FrameResult[]
+//
+// Uses Phase 8 (getMergedBeamSlabResults) — true DOF merging, no penalty.
+// Beam-line slab DOFs are physically shared with beam DOFs, giving correct
+// non-zero displacements and moments.
 //
 // Mapping table:
 //   CoupledBeamResult field           → FrameResult beam field
 //   ─────────────────────────────────────────────────────────
-//   endForcesLocal.My1 (N·mm ÷ 1e6)  → Mleft  (kN·m, signed)
-//   endForcesLocal.My2 (N·mm ÷ 1e6)  → Mright (kN·m, signed)
-//   max positive central element moment → Mmid  (kN·m, positive sagging)
+//   endForcesLocal.My1 (N·mm ÷ 1e6)  → Mleft  (kN·m, signed — from first element)
+//   endForcesLocal.My2 (N·mm ÷ 1e6)  → Mright (kN·m, signed — from last element)
+//   max positive central element moment → Mmid  (kN·m, positive = sagging)
 //   maxShear_kN                        → Vu    (kN, absolute)
 //   |endForcesLocal.Vz1| (N ÷ 1000)   → Rleft  (kN, positive)
 //   |endForcesLocal.Vz2| (N ÷ 1000)   → Rright (kN, positive)
 //
-// Internal beams are shared across ≥2 slab solves; forces are accumulated
-// element-wise (summed) mirroring the ETABS accumulation strategy used in
-// FEMComparisonPanel.  maxShear uses Math.max (envelope).
+// Sign convention: hogging (supports) < 0, sagging (midspan) > 0.
+// Diagram shows negative above the beam line, positive below.
+//
+// Internal beams shared across ≥2 slab solves have forces accumulated
+// element-wise (summed). maxShear uses Math.max (envelope).
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface BeamAccumulator {
@@ -70,7 +76,7 @@ interface BeamAccumulator {
 }
 
 export function adaptFEMResults(
-  coupledResults: CoupledResult[],
+  coupledResults: MergedResult[],
   beams: Beam[],
   frames: Frame[],
 ): FrameResult[] {

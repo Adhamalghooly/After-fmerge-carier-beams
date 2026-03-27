@@ -482,7 +482,8 @@ export function solveMergedDOFSystem(
 
     const momentList: number[] = [];
     const shearList:  number[] = [];
-    let lastEndForces: CoupledBeamEndForces | null = null;
+    let firstEndForces: CoupledBeamEndForces | null = null;
+    let lastEndForces:  CoupledBeamEndForces | null = null;
 
     for (let ei = 0; ei < beamNodes.length - 1; ei++) {
       const nA     = beamNodes[ei];
@@ -514,11 +515,20 @@ export function solveMergedDOFSystem(
       // Compute local forces
       const f12 = elementLocalForces(d12, K_loc, T);
 
-      momentList.push(Math.abs(f12[4])  * 1e-6);   // My1 in kN·m
-      momentList.push(Math.abs(f12[10]) * 1e-6);   // My2 in kN·m
+      // Keep signed moments so hogging (negative) and sagging (positive) are preserved
+      momentList.push(f12[4]  * 1e-6);   // My1 in kN·m (signed)
+      momentList.push(f12[10] * 1e-6);   // My2 in kN·m (signed)
       shearList.push(Math.abs(f12[2])   * 1e-3);   // Vz1 in kN
       shearList.push(Math.abs(f12[8])   * 1e-3);   // Vz2 in kN
 
+      // Capture left-end forces from the FIRST element only
+      if (ei === 0) {
+        firstEndForces = {
+          N1:  f12[0],  Vy1: f12[1],  Vz1: f12[2],  T1:  f12[3],  My1: f12[4],  Mz1: f12[5],
+          N2:  f12[6],  Vy2: f12[7],  Vz2: f12[8],  T2:  f12[9],  My2: f12[10], Mz2: f12[11],
+        };
+      }
+      // Capture right-end forces from the LAST element only
       if (ei === beamNodes.length - 2) {
         lastEndForces = {
           N1:  f12[0],  Vy1: f12[1],  Vz1: f12[2],  T1:  f12[3],  My1: f12[4],  Mz1: f12[5],
@@ -527,15 +537,31 @@ export function solveMergedDOFSystem(
       }
     }
 
-    const maxMoment = momentList.length > 0 ? Math.max(...momentList) : 0;
-    const maxShear  = shearList.length > 0  ? Math.max(...shearList)  : 0;
+    // Envelope: peak absolute moment/shear across all elements
+    const maxMoment = momentList.length > 0 ? Math.max(...momentList.map(Math.abs)) : 0;
+    const maxShear  = shearList.length > 0  ? Math.max(...shearList)                : 0;
+
+    // Combined end forces:
+    //   My1 / Vz1 come from the FIRST element (left-end support)
+    //   My2 / Vz2 come from the LAST  element (right-end support)
+    const combinedEnd: CoupledBeamEndForces = {
+      N1:  firstEndForces?.N1  ?? 0,
+      Vy1: firstEndForces?.Vy1 ?? 0,
+      Vz1: firstEndForces?.Vz1 ?? 0,
+      T1:  firstEndForces?.T1  ?? 0,
+      My1: firstEndForces?.My1 ?? 0,   // LEFT support moment (signed, hogging < 0)
+      Mz1: firstEndForces?.Mz1 ?? 0,
+      N2:  lastEndForces?.N2   ?? 0,
+      Vy2: lastEndForces?.Vy2  ?? 0,
+      Vz2: lastEndForces?.Vz2  ?? 0,
+      T2:  lastEndForces?.T2   ?? 0,
+      My2: lastEndForces?.My2  ?? 0,   // RIGHT support moment (signed, hogging < 0)
+      Mz2: lastEndForces?.Mz2  ?? 0,
+    };
 
     beamResults.push({
       beamId: beam.id,
-      endForcesLocal: lastEndForces ?? {
-        N1:0, Vy1:0, Vz1:0, T1:0, My1:0, Mz1:0,
-        N2:0, Vy2:0, Vz2:0, T2:0, My2:0, Mz2:0,
-      },
+      endForcesLocal: combinedEnd,
       maxMoment_kNm:      maxMoment,
       maxShear_kN:        maxShear,
       elementMoments_kNm: momentList,
