@@ -515,9 +515,13 @@ export function solveMergedDOFSystem(
       // Compute local forces
       const f12 = elementLocalForces(d12, K_loc, T);
 
-      // Keep signed moments so hogging (negative) and sagging (positive) are preserved
-      momentList.push(f12[4]  * 1e-6);   // My1 in kN·m (signed)
-      momentList.push(f12[10] * 1e-6);   // My2 in kN·m (signed)
+      // Structural moment convention:
+      //   My2 of element i  = structural moment at the RIGHT node of element i
+      //   My1 of element i  = structural moment at LEFT node, but with OPPOSITE sign
+      //   (at any shared node: My2(i) = -My1(i+1) for equilibrium)
+      // → Store only My2 per element for a consistent, sign-correct moment array.
+      //   The left-support moment is recovered separately via firstEndForces.My1 (negated).
+      momentList.push(f12[10] * 1e-6);   // My2: structural moment at element right-node (kN·m, signed)
       shearList.push(Math.abs(f12[2])   * 1e-3);   // Vz1 in kN
       shearList.push(Math.abs(f12[8])   * 1e-3);   // Vz2 in kN
 

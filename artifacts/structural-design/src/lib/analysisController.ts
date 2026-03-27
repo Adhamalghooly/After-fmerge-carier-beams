@@ -140,22 +140,37 @@ export function adaptFEMResults(
 
       const n = a.elementMoments.length;
 
-      // ── End moments (N·mm → kN·m) ────────────────────────────────────────
-      const Mleft  = a.My1_Nmm / 1e6;
-      const Mright = a.My2_Nmm / 1e6;
+      // ── End moments (N·mm → kN·m, signed) ────────────────────────────────
+      //
+      // Sign convention clarification:
+      //   In the Euler-Bernoulli element (McGuire, θy = −∂w/∂x):
+      //     My1 > 0  at a fixed left support  → hogging in structural terms
+      //     My2 < 0  at a fixed right support → hogging in structural terms
+      //   So My1 and My2 carry OPPOSITE sign polarities for the same physical state.
+      //
+      //   Structural convention:  sagging > 0,  hogging < 0
+      //     Mleft  = −My1  (negate to match structural sign)
+      //     Mright =  My2  (already structural sign-correct)
+      const Mleft  = -a.My1_Nmm / 1e6;   // negate My1 → structural left-end moment
+      const Mright =  a.My2_Nmm / 1e6;   // My2 is direct structural right-end moment
 
-      // ── Midspan moment: max positive value in the central 50% of elements ─
-      // This gives the sagging (positive) design moment for bottom steel.
-      // Fall back to the absolute peak if the central region is fully hogging.
+      // ── Midspan moment: maximum value in central 50% of elements ──────────
+      // elementMoments stores My2 per element (one value each), so n equals
+      // the number of sub-elements.  The central 50% covers approximately the
+      // mid-span region where positive (sagging) moments peak.
+      // If no positive moment exists (fully hogging beam), fall back to
+      // the absolute peak from the envelope (always positive by design).
       let Mmid = 0;
       if (n > 0) {
         const lo = Math.floor(n * 0.25);
         const hi = Math.ceil(n * 0.75);
         const central = a.elementMoments.slice(lo, hi);
         const maxCentral = central.length > 0 ? Math.max(...central) : -Infinity;
-        Mmid = maxCentral > 0 ? maxCentral : a.maxMoment;
+        // Use the maximum positive midspan moment; if all central elements are
+        // hogging, fall back to the unsigned peak (for design envelope purposes).
+        Mmid = maxCentral > 0 ? maxCentral : Math.max(a.maxMoment, 0);
       } else {
-        Mmid = a.maxMoment;
+        Mmid = Math.max(a.maxMoment, 0);
       }
 
       // ── Shear and reactions ───────────────────────────────────────────────
