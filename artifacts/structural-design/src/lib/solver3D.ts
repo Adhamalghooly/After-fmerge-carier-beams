@@ -17,9 +17,9 @@
  *   - Member end releases (pins)
  * 
  * ACI 318-19 compliant stiffness modifiers:
- *   - Beams: 0.35 Ig (cracked section)
- *   - Columns: 0.70 Ig (cracked section)
- *   - Slabs: 0.25 Ig (for lateral analysis)
+ *   - Beams:   0.35 Ig (cracked section — ACI 318-19 §6.6.3.1.1)
+ *   - Columns: 0.65 Ig (frame interaction — 0.35 جسور · 0.65 أعمدة)
+ *   - Slabs:   0.25 Ig (for lateral analysis — ACI 318-19 §6.6.3.1.1)
  */
 
 // ======================== TYPES ========================

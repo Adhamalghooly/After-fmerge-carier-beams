@@ -803,8 +803,9 @@ export function analyzeFrame(
       const Ic = (col.b / 1000) * (col.h / 1000) ** 3 / 12;
       const Ec = 4700 * Math.sqrt(mat.fc) * 1000;
       const Lc = col.L / 1000;
-      // ACI 318-19 §6.6.3.1.1: Column stiffness modifier = 0.70
-      colStiffness = 4 * Ec * (0.70 * Ic) / Lc;
+      // ACI 318-19 §6.6.3.1.1 / ETABS Frame Interaction: Column stiffness modifier = 0.65
+      // (0.35 للجسور · 0.65 للأعمدة — للتفاعل الكامل بين الإطارات)
+      colStiffness = 4 * Ec * (0.65 * Ic) / Lc;
     }
 
     const x = i === 0 ? 0 : nodes[i - 1].x + frameBeams[i - 1].length;

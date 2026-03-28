@@ -170,7 +170,7 @@ const ETABSComparisonTable: React.FC<Props> = ({
             </span>
           </div>
           <p className="text-[10px] text-amber-600 dark:text-amber-400">
-            ⚠️ الفرق المتوقع بين 2D و 3D يعود لـ: (1) معاملات الجساءة ACI في 3D (0.35Ig جسور · 0.70Ig أعمدة)
+            ⚠️ الفرق المتوقع بين 2D و 3D يعود لـ: (1) معاملات الجساءة ACI في 3D (0.35Ig جسور · 0.65Ig أعمدة — للتفاعل الكامل بين الإطارات)
             و (2) التفاعل الكامل بين الإطارات في التحليل 3D.
             القيم المعتمدة في التصميم هي قيم <span className="font-semibold">3D</span>.
           </p>

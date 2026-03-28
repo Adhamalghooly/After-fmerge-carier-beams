@@ -59,6 +59,12 @@ export interface AppState {
     nodeJ: { ux: boolean; uy: boolean; uz: boolean; rx: boolean; ry: boolean; rz: boolean };
   }>;
   selectedEngine: EngineType;
+  /**
+   * إهمال جساءة البلاطات عند التحليل.
+   * عند التفعيل: البلاطات تنقل الأحمال فقط إلى الجسور (طريقة المنطقة التأثيرية)
+   * والإطارات (جسور + أعمدة) تحمل كل الجساءة الإنشائية — مطابق لـ ETABS "No Slab Stiffness".
+   */
+  ignoreSlab: boolean;
 }
 
 export type AppAction =
@@ -125,7 +131,8 @@ export type AppAction =
   | { type: 'SET_FRAME_END_RELEASES'; posKey: string; nodeIRestraints: { ux: boolean; uy: boolean; uz: boolean; rx: boolean; ry: boolean; rz: boolean }; nodeJRestraints: { ux: boolean; uy: boolean; uz: boolean; rx: boolean; ry: boolean; rz: boolean } }
   | { type: 'LOAD_PROJECT'; data: Partial<AppState> }
   | { type: 'RESET_TO_DEFAULT' }
-  | { type: 'SET_ENGINE'; engine: EngineType };
+  | { type: 'SET_ENGINE'; engine: EngineType }
+  | { type: 'SET_IGNORE_SLAB'; value: boolean };
 
 const defaultStoryId = 'ST1';
 
@@ -197,6 +204,7 @@ export const initialState: AppState = {
   supportRestraints: {},
   frameEndReleases: {},
   selectedEngine: 'legacy_3d',
+  ignoreSlab: false,
 };
 
 // Actions that should NOT be tracked in undo (UI-only actions)
@@ -206,7 +214,7 @@ const NON_UNDOABLE_ACTIONS = new Set([
   'OPEN_ELEM_PROPS', 'CLOSE_ELEM_PROPS', 'OPEN_DIAGRAM', 'CLOSE_DIAGRAM',
   'INC_MODEL_VERSION', 'SET_ANALYZED', 'SET_FRAME_RESULTS', 'SET_BOB_CONNECTIONS',
   'UNDO', 'SAVE_SNAPSHOT', 'CLEAR_SAVED_MESSAGE', 'SET_MODE', 'SELECT_STORY',
-  'LOAD_PROJECT', 'RESET_TO_DEFAULT', 'SET_ENGINE',
+  'LOAD_PROJECT', 'RESET_TO_DEFAULT', 'SET_ENGINE', 'SET_IGNORE_SLAB',
 ]);
 
 function coreReducer(state: AppState, action: AppAction): AppState {
@@ -256,6 +264,8 @@ function coreReducer(state: AppState, action: AppAction): AppState {
       return { ...state, bobConnections: action.connections };
     case 'SET_ENGINE':
       return { ...state, selectedEngine: action.engine, analyzed: false };
+    case 'SET_IGNORE_SLAB':
+      return { ...state, ignoreSlab: action.value, analyzed: false };
     case 'SET_ACTIVE_TAB':
       return { ...state, activeTab: action.tab };
     case 'SET_MODE':

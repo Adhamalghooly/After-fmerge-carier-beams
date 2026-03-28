@@ -100,7 +100,7 @@ const Index = () => {
   const {
     stories, selectedStoryId,
     slabs, mat, slabProps, beamB, beamH, colB, colH, colL, colLBelow, colTopEndCondition, colBottomEndCondition,
-    analyzed, frameResults, bobConnections, selectedEngine,
+    analyzed, frameResults, bobConnections, selectedEngine, ignoreSlab,
     activeTab, mode, activeTool, pendingNode,
     selectedNodeId, selectedFrameId, selectedAreaId,
     removedColumnIds, removedBeamIds, beamOverrides, colOverrides, slabPropsOverrides, extraBeams, extraColumns, supportRestraints, frameEndReleases,
@@ -364,8 +364,8 @@ const Index = () => {
   const runAnalysis = () => {
     setFemError(null);
 
-    // ── FEM (Coupled Beam–Slab) engine path ─────────────────────────────────
-    if (selectedEngine === 'fem_coupled') {
+    // ── FEM (Coupled Beam–Slab) engine path — فقط عند عدم إهمال جساءة البلاطات ──
+    if (selectedEngine === 'fem_coupled' && !ignoreSlab) {
       if (slabs.length === 0) {
         setFemError('يتطلب محرك FEM وجود بلاطات معرّفة في النموذج');
         return;
@@ -398,6 +398,14 @@ const Index = () => {
       }
       dispatch({ type: 'SET_ANALYZED', value: true });
       return;
+    }
+
+    // ── FEM + إهمال جساءة البلاطات: تحليل إطار نقي (كـ ETABS "No Slab Stiffness") ──
+    // البلاطات تُستخدم فقط لنقل الأحمال إلى الجسور عبر المنطقة التأثيرية
+    // الجسور والأعمدة تحمل كل الجساءة الإنشائية — بدون مساهمة البلاطات
+    if (selectedEngine === 'fem_coupled' && ignoreSlab) {
+      // ينتقل إلى مسار المحرك 3D أدناه تلقائياً (نفس المنطق)
+      // لا يوجد return هنا — يكمل التنفيذ إلى المسار التالي
     }
 
     // ── Legacy 3D engine path ────────────────────────────────────────────────
@@ -1707,12 +1715,86 @@ const Index = () => {
                   >
                     {ENGINE_LABELS[selectedEngine]}
                   </Badge>
-                  {selectedEngine === 'fem_coupled' && (
+                  {selectedEngine === 'fem_coupled' && !ignoreSlab && (
                     <span className="text-[10px] text-muted-foreground">
                       يتطلب وجود بلاطات وأعمدة — يستغرق وقتاً أطول
                     </span>
                   )}
                 </div>
+
+                {/* ── زر إهمال جساءة البلاطات ── */}
+                <div className="mt-3 pt-3 border-t border-border/50">
+                  <label className="flex items-start gap-3 cursor-pointer group">
+                    <div className="relative mt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={ignoreSlab}
+                        onChange={e => dispatch({ type: 'SET_IGNORE_SLAB', value: e.target.checked })}
+                        className="sr-only"
+                      />
+                      <div
+                        onClick={() => dispatch({ type: 'SET_IGNORE_SLAB', value: !ignoreSlab })}
+                        className={`w-9 h-5 rounded-full transition-colors cursor-pointer flex items-center px-0.5 ${
+                          ignoreSlab
+                            ? 'bg-amber-500'
+                            : 'bg-muted border border-border'
+                        }`}
+                      >
+                        <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
+                          ignoreSlab ? 'translate-x-4' : 'translate-x-0'
+                        }`} />
+                      </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-foreground">
+                          إهمال جساءة البلاطات
+                        </span>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                          ignoreSlab
+                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-400/40'
+                            : 'bg-muted text-muted-foreground border border-border'
+                        }`}>
+                          {ignoreSlab ? 'مُفعّل' : 'غير مُفعّل'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5 leading-relaxed">
+                        {ignoreSlab
+                          ? '⚠️ البلاطات تنقل الأحمال فقط — الجسور والأعمدة تحمل كل الجساءة (مطابق لـ ETABS "No Slab Stiffness")'
+                          : 'البلاطات تُشارك في الجساءة الإنشائية للإطار (التحليل الكامل المقترن)'}
+                      </p>
+                      {ignoreSlab && selectedEngine === 'fem_coupled' && (
+                        <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5 font-medium">
+                          ↳ سيُستخدم محرك 3D (إطار نقي) مع أحمال المنطقة التأثيرية
+                        </p>
+                      )}
+                    </div>
+                  </label>
+
+                  {/* شرح معاملات الجساءة */}
+                  <div className="mt-2 rounded-md bg-blue-500/5 border border-blue-200/50 dark:border-blue-800/50 px-3 py-2">
+                    <p className="text-[10px] text-blue-700 dark:text-blue-400 font-semibold mb-1">
+                      معاملات تخفيض الجساءة (ACI 318-19 §6.6.3):
+                    </p>
+                    <div className="grid grid-cols-3 gap-1 text-[10px] text-center">
+                      <div className="rounded bg-background border border-border px-1 py-1">
+                        <div className="font-bold text-foreground">0.35</div>
+                        <div className="text-muted-foreground">جسور</div>
+                      </div>
+                      <div className="rounded bg-background border border-border px-1 py-1">
+                        <div className="font-bold text-foreground">0.65</div>
+                        <div className="text-muted-foreground">أعمدة</div>
+                      </div>
+                      <div className={`rounded border px-1 py-1 ${ignoreSlab ? 'bg-amber-500/10 border-amber-400/40' : 'bg-background border-border'}`}>
+                        <div className={`font-bold ${ignoreSlab ? 'text-amber-600 dark:text-amber-400 line-through' : 'text-foreground'}`}>
+                          {ignoreSlab ? '0' : '0.25'}
+                        </div>
+                        <div className="text-muted-foreground">بلاطات</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 {femError && (
                   <div className="mt-2 rounded-md bg-destructive/10 border border-destructive/30 px-3 py-2 text-xs text-destructive">
                     ⚠️ {femError}
@@ -1763,6 +1845,29 @@ const Index = () => {
               </CardContent></Card>
             ) : (
               <div className="space-y-4">
+                {/* ── مؤشر وضع التحليل ── */}
+                <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] border ${
+                  ignoreSlab
+                    ? 'bg-amber-500/10 border-amber-400/40 text-amber-700 dark:text-amber-400'
+                    : selectedEngine === 'fem_coupled'
+                      ? 'bg-emerald-500/10 border-emerald-400/40 text-emerald-700 dark:text-emerald-400'
+                      : 'bg-blue-500/10 border-blue-400/40 text-blue-700 dark:text-blue-400'
+                }`}>
+                  <Zap size={12} className="shrink-0" />
+                  <span className="font-semibold">
+                    {ignoreSlab
+                      ? 'تحليل إطار نقي — جساءة البلاطات مُهملة'
+                      : selectedEngine === 'fem_coupled'
+                        ? 'تحليل FEM مقترن (جسور + بلاطات)'
+                        : 'تحليل 3D — إطارات ثلاثية الأبعاد'}
+                  </span>
+                  <span className="opacity-70 mr-auto text-[10px]">
+                    {ignoreSlab
+                      ? '0.35 جسور · 0.65 أعمدة · 0 بلاطات'
+                      : '0.35 جسور · 0.65 أعمدة · 0.25 بلاطات'}
+                  </span>
+                </div>
+
                 {/* Story filter for analysis */}
                 <StorySelector
                   stories={stories} selectedStoryId={selectedStoryId}

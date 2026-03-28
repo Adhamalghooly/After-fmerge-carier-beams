@@ -134,7 +134,7 @@ function build3DModelWithPatternLoading(
       E,
       G,
       wLocal: { wx: -1.2 * mat.gamma * (col.b * col.h) / 1e6, wy: 0, wz: 0 },
-      stiffnessModifier: 0.70,
+      stiffnessModifier: 0.65,
     });
   }
 
