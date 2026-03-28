@@ -493,17 +493,32 @@ export function solveConnectedSlabs(
       const elemDOF    = p10BeamElemDOFs(nA.globalId, jA, nB.globalId, jB, nSlabDOF);
       const d12_global = elemDOF.map(gi => d_full[gi]);
       const forces     = elementLocalForces(d12_global, K_loc, T);
-      // forces[0..5] = N1,Vy1,Vz1,Mx1,My1,Mz1 at node A
-      // forces[6..11]= N2,Vy2,Vz2,Mx2,My2,Mz2 at node B
+      // forces[0..5]  = N1, Vy1, Vz1, Mx1, My1, Mz1  at node A (left end)
+      // forces[6..11] = N2, Vy2, Vz2, Mx2, My2, Mz2  at node B (right end)
+      //
+      // Sign convention (McGuire, θy = −∂w/∂x):
+      //   My2 at any shared node = −My1 of the next element (equilibrium)
+      //   Store My2 (index 10, signed) for a consistent sign-correct moment array.
+      //   In McGuire convention:
+      //     My2 < 0  at a hogging right-end support → structural hogging (negative)
+      //     My2 > 0  at a sagging midspan right-end  → structural sagging (positive)
+      //   This matches exactly what adaptFEMResults expects for the Mmid calculation.
 
-      const Vz_elem = Math.abs(forces[2]);
-      const My_elem = forces[4];
+      const My2_elem  = forces[10];           // signed moment at right end (N·mm)
+      const Vz1_elem  = Math.abs(forces[2]);  // shear at left  end (N)
+      const Vz2_elem  = Math.abs(forces[8]);  // shear at right end (N)
 
-      elementMoments_kNm.push(My_elem / 1e6);
-      elementShears_kN.push(Vz_elem / 1e3);
+      // Moment array: signed My2 per element (matches Phase 8 pattern exactly)
+      elementMoments_kNm.push(My2_elem / 1e6);
 
-      if (Math.abs(My_elem / 1e6) > maxMoment_kNm) maxMoment_kNm = Math.abs(My_elem / 1e6);
-      if (Vz_elem / 1e3          > maxShear_kN)    maxShear_kN   = Vz_elem / 1e3;
+      // Shear array: both ends, as in Phase 8
+      elementShears_kN.push(Vz1_elem / 1e3);
+      elementShears_kN.push(Vz2_elem / 1e3);
+
+      // Running maximum (absolute value)
+      if (Math.abs(My2_elem) / 1e6 > maxMoment_kNm) maxMoment_kNm = Math.abs(My2_elem) / 1e6;
+      if (Vz1_elem / 1e3            > maxShear_kN)   maxShear_kN   = Vz1_elem / 1e3;
+      if (Vz2_elem / 1e3            > maxShear_kN)   maxShear_kN   = Vz2_elem / 1e3;
 
       if (ei === 0)                      firstForces = forces;
       if (ei === beamNodes.length - 2)   lastForces  = forces;

@@ -270,6 +270,19 @@ export function rectangularJ(b: number, h: number): number {
   return (bMin ** 3 * bMax / 3) * (1 - 0.63 * r + 0.052 * r ** 5);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ACI 318-19 Table 6.6.3.1.1 — Effective Stiffness Modifiers (Ie / Ig)
+//
+//   Beams  (non-prestressed): Ie = 0.35 · Ig
+//   Slabs  (two-way):         Ie = 0.25 · Ig   ← applied in mindlinShell.ts
+//   Columns:                  Ie = 0.70 · Ig   ← applied in structuralEngine.ts
+//
+// Applying 0.35 to Iy and Iz of every beam element in the FEM engine ensures
+// the relative slab/beam stiffness matches ETABS property-modifier settings
+// and avoids artificially concentrating moment at beam ends.
+// ─────────────────────────────────────────────────────────────────────────────
+export const BEAM_STIFFNESS_REDUCTION = 0.35;   // ACI 318-19 §6.6.3.1.1
+
 /**
  * Build BeamFrameSection from beam cross-section dimensions and material.
  * @param b_mm   Beam width (mm)
@@ -288,9 +301,11 @@ export function sectionFromBeam(
   const G  = Ec / (2 * (1 + nu));
 
   const A  = b_mm * h_mm;
-  const Iy = b_mm * h_mm ** 3 / 12;   // strong axis  (vertical bending)
-  const Iz = h_mm * b_mm ** 3 / 12;   // weak axis    (in-plane bending)
-  const J  = rectangularJ(b_mm, h_mm);
+
+  // ACI 318-19 Table 6.6.3.1.1: reduce beam bending stiffness to 35 % of gross
+  const Iy = BEAM_STIFFNESS_REDUCTION * b_mm * h_mm ** 3 / 12;   // strong axis (vertical bending)
+  const Iz = BEAM_STIFFNESS_REDUCTION * h_mm * b_mm ** 3 / 12;   // weak axis   (in-plane bending)
+  const J  = rectangularJ(b_mm, h_mm);   // torsion — unreduced (no ACI modifier)
 
   return { E: Ec, G, A, Iy, Iz, J, L: L_mm };
 }
