@@ -1,0 +1,91 @@
+════════════════════════════════════════════════════════════════════════
+  FEM NODE TOPOLOGY ARCHITECTURE FIX — VALIDATION REPORT
+  Generated: 2026-03-28T16:30:02.410Z
+════════════════════════════════════════════════════════════════════════
+
+A. NODE REGISTRY IMPLEMENTATION
+────────────────────────────────────────────────────────────────────────
+
+  Function : GlobalNodeRegistry.getOrCreateNode(x, y, z)
+  Location : src/slabFEMEngine/nodeRegistry.ts
+
+  Node structure:
+    { id, x, y, z, connectedElements[] }
+
+  Lookup algorithm:
+    1. Hash coordinate to grid cell key  round(x/tol) _ round(y/tol) _ round(z/tol)
+    2. Probe 27 neighbouring cells (3×3×3) to handle grid-boundary floating-point
+    3. If existing node within tol (1e-6 mm) → return its id
+    4. Otherwise → create new node, store in bucket, return new id
+
+  Changes to mesh.ts:
+    • meshSlab() now accepts optional GlobalNodeRegistry parameter
+    • Every grid intersection calls reg.getOrCreateNode(x, y, 0)
+    • Local node.id = slab-local array index (existing DOF indexing unchanged)
+    • node.globalId = registry-assigned ID (cross-slab unique)
+    • After each element is built, reg.registerElement() records connectivity
+    • meshMultipleSlabs() creates ONE registry for ALL slabs
+
+  Backward compatibility:
+    • When no registry is passed, a private local registry is created
+    • In that case globalId === id — all callers work unchanged
+
+B. BEFORE vs AFTER NODE COUNTS
+────────────────────────────────────────────────────────────────────────
+
+  Model: symmetric 5 × 5 m slab, 4 boundary beams, meshDensity = 4
+
+  BEFORE (independent per-slab mesh, no registry sharing):
+    Nodes created by slab-1 mesh : 441
+
+  AFTER  (shared GlobalNodeRegistry across all slabs):
+    Unique global nodes          : 441
+    Duplicate nodes eliminated   : 0
+
+  Beam node counts:
+    B-south     : 21 nodes  globalIds=[0, 1, 2, 3, 4…]
+    B-north     : 21 nodes  globalIds=[420, 421, 422, 423, 424…]
+    B-west      : 21 nodes  globalIds=[0, 21, 42, 63, 84…]
+    B-east      : 21 nodes  globalIds=[20, 41, 62, 83, 104…]
+    ✓ ALL IDENTICAL (required for symmetry)
+
+C. CORNER NODE CONNECTIVITY
+────────────────────────────────────────────────────────────────────────
+
+  Requirement: each corner node must connect to exactly 2 beams + slab elements
+
+  Corner             globalId   Beams                        SlabElems    Status
+  ------------------ ---------- ---------------------------- ------------ ------
+  (0, 0) m           0          B-south, B-west              1            ✓ OK
+  (5, 0) m           20         B-south, B-east              1            ✓ OK
+  (5, 5) m           440        B-north, B-east              1            ✓ OK
+  (0, 5) m           420        B-north, B-west              1            ✓ OK
+
+D. SYMMETRY VALIDATION RESULTS
+────────────────────────────────────────────────────────────────────────
+
+  B-south / B-north:  peak=10.3491 vs 10.3491 kN·m/m  error=0.00%  ✓ PASS  
+  B-west / B-east:  peak=10.3491 vs 10.3491 kN·m/m  error=0.00%  ✓ PASS  
+
+  Node count symmetry:
+    ✓ PASS
+
+  Corner connectivity:
+    ✓ PASS — all corners correctly connected
+
+────────────────────────────────────────────────────────────────────────
+  OVERALL RESULT: ✓  ALL TESTS PASSED
+────────────────────────────────────────────────────────────────────────
+
+E. DEBUG LOG (from runSymmetryTest)
+────────────────────────────────────────────────────────────────────────
+  Mesh: 20 × 20 elements, 441 slab nodes, 441 global nodes.
+  Node deduplication: 441 local → 441 global (saved 0).
+  ✓ All 4 beams have identical node count: 21 nodes each.
+  ✓ Corner (0, 0) m: globalId=0, beams=[B-south, B-west], slabElems=1.
+  ✓ Corner (5, 0) m: globalId=20, beams=[B-south, B-east], slabElems=1.
+  ✓ Corner (5, 5) m: globalId=440, beams=[B-north, B-east], slabElems=1.
+  ✓ Corner (0, 5) m: globalId=420, beams=[B-north, B-west], slabElems=1.
+  ✓ Moment symmetry B-south/B-north (My): peak 10.3491 vs 10.3491 kN·m/m  (error 0.00 %).
+  ✓ Moment symmetry B-west/B-east (Mx): peak 10.3491 vs 10.3491 kN·m/m  (error 0.00 %).
+  ✓ OVERALL: Symmetry test PASSED.

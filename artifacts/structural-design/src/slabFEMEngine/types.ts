@@ -126,6 +126,15 @@ export interface FEMNode {
   beamId:  string | null;
   /** Normalised position along that beam [0, 1]. */
   beamPos: number;
+  /**
+   * Global node ID assigned by GlobalNodeRegistry when meshSlab() is called
+   * with a shared registry.  When no registry is used (single-slab backward-
+   * compatible path), globalId === id.
+   *
+   * Use globalId — not id — whenever nodes from MULTIPLE slabs must be
+   * referenced in a single global stiffness assembly.
+   */
+  globalId: number;
 }
 
 /**

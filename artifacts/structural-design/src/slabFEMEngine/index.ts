@@ -107,6 +107,22 @@ export { extractStressEdgeForces, summariseStressExtraction } from './stressEdge
 export { runPhase6Regression } from './rotationalCoupling';
 export type { RotationalCouplingResult, RotationalCouplingNodeResult } from './rotationalCoupling';
 
+// ── Phase 10: Global Node Registry (topology fix) ───────────────────────────
+export { GlobalNodeRegistry } from './nodeRegistry';
+export type { GlobalFEMNode, ConnectivityReport } from './nodeRegistry';
+export { meshMultipleSlabs } from './mesh';
+export type { MultiSlabMesh } from './mesh';
+export {
+  runSymmetryTest,
+  generateTopologyReport,
+} from './symmetryValidation';
+export type {
+  SymmetryTestResult,
+  BeamNodeInfo,
+  CornerNodeInfo,
+  MomentSymmetryCheck,
+} from './symmetryValidation';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Extended result type for Phase-6 output
 // ─────────────────────────────────────────────────────────────────────────────
