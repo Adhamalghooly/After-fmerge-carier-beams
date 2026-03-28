@@ -270,21 +270,24 @@ export function rectangularJ(b: number, h: number): number {
   return (bMin ** 3 * bMax / 3) * (1 - 0.63 * r + 0.052 * r ** 5);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ACI 318-19 Table 6.6.3.1.1 — Effective Stiffness Modifiers (Ie / Ig)
-//
-//   Beams  (non-prestressed): Ie = 0.35 · Ig
-//   Slabs  (two-way):         Ie = 0.25 · Ig   ← applied in mindlinShell.ts
-//   Columns:                  Ie = 0.70 · Ig   ← applied in structuralEngine.ts
-//
-// Applying 0.35 to Iy and Iz of every beam element in the FEM engine ensures
-// the relative slab/beam stiffness matches ETABS property-modifier settings
-// and avoids artificially concentrating moment at beam ends.
-// ─────────────────────────────────────────────────────────────────────────────
-export const BEAM_STIFFNESS_REDUCTION = 0.35;   // ACI 318-19 §6.6.3.1.1
-
 /**
  * Build BeamFrameSection from beam cross-section dimensions and material.
+ *
+ * ── Stiffness note ────────────────────────────────────────────────────────
+ * In the coupled slab-beam FEM (Phase 10), the beam element represents ONLY
+ * the physical beam (rectangular downstand section).  The slab is modelled
+ * separately as Mindlin shell elements, so there is no T-section effect here.
+ *
+ * ACI 318-19 Table 6.6.3.1.1 (Ie = 0.35 Ig for beams) applies to the
+ * EQUIVALENT FRAME METHOD or direct-analysis method where beams are the sole
+ * lateral/gravity load path.  In the coupled FEM, the beam and slab share the
+ * stiffness organically through the global K matrix; applying the frame-only
+ * modifier would under-stiffen beams relative to the slab (slab already uses
+ * its own 0.25 modifier).  Therefore the gross rectangular section is used
+ * here.  If the user selects "ignore slab stiffness", the beam becomes the
+ * sole carrier and its gross stiffness is appropriate for that mode too.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
  * @param b_mm   Beam width (mm)
  * @param h_mm   Beam depth (mm)
  * @param L_mm   Beam element length (mm)
@@ -301,11 +304,9 @@ export function sectionFromBeam(
   const G  = Ec / (2 * (1 + nu));
 
   const A  = b_mm * h_mm;
-
-  // ACI 318-19 Table 6.6.3.1.1: reduce beam bending stiffness to 35 % of gross
-  const Iy = BEAM_STIFFNESS_REDUCTION * b_mm * h_mm ** 3 / 12;   // strong axis (vertical bending)
-  const Iz = BEAM_STIFFNESS_REDUCTION * h_mm * b_mm ** 3 / 12;   // weak axis   (in-plane bending)
-  const J  = rectangularJ(b_mm, h_mm);   // torsion — unreduced (no ACI modifier)
+  const Iy = b_mm * h_mm ** 3 / 12;   // strong axis (vertical bending) — gross section
+  const Iz = h_mm * b_mm ** 3 / 12;   // weak axis   (in-plane bending) — gross section
+  const J  = rectangularJ(b_mm, h_mm);
 
   return { E: Ec, G, A, Iy, Iz, J, L: L_mm };
 }
