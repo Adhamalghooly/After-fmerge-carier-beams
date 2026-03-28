@@ -703,6 +703,19 @@ export { cuthillMcKee, sparseSolve }           from './sparseSolver';
 import { solveSparsePhase9 as _solveSparse9 } from './sparsePhase9';
 import type { Phase9DebugInfo }                from './sparsePhase9';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 10 — Connected Multi-Slab Global FEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type {
+  MultiSlabResult,
+  MultiSlabDebugInfo,
+  PerSlabResult,
+} from './multiSlabSystem';
+
+import { solveConnectedSlabs } from './multiSlabSystem';
+export { solveConnectedSlabs } from './multiSlabSystem';
+
 /**
  * getSparseBeamSlabResults
  * ─────────────────────────
@@ -765,4 +778,65 @@ export function getSparseBeamSlabResults(
   }
 
   return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 10 — Connected Multi-Slab public entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * getConnectedSlabResults
+ * ────────────────────────
+ * Phase 10 public entry point: analyzes ALL slabs in ONE unified global FEM
+ * system.  Slabs sharing a beam or edge have CONTINUOUS displacements and
+ * rotations at the shared boundary — moment redistribution between adjacent
+ * slabs is handled automatically by the global solver.
+ *
+ * Key differences vs getMergedBeamSlabResults (Phase 8):
+ *   - Phase 8 : N separate K matrices, one per slab  → no continuity
+ *   - Phase 10: ONE global K for all slabs combined  → full continuity
+ *
+ * The returned array contains exactly ONE MultiSlabResult (the whole system),
+ * with beamResults covering every beam in the model.
+ *
+ * @param model       FEM input model (coordinates in metres)
+ * @param meshDensity Mesh divisions per metre (default 2)
+ */
+export function getConnectedSlabResults(
+  model:       FEMInputModel,
+  meshDensity  = 2,
+): MergedResult[] {
+  const { slabProps, mat } = model;
+
+  const ownWeight_kNm2 = (slabProps.thickness / 1000) * mat.gamma;
+  const q_kNm2  = ownWeight_kNm2 + slabProps.finishLoad + slabProps.liveLoad;
+  const q_Nmm2  = q_kNm2 * 1e-3;
+
+  const mm = toMmModel(model);
+
+  if (mm.slabs.length === 0) {
+    console.warn('[Phase10] No slabs in model.');
+    return [];
+  }
+
+  const activeSlab  = new Set(mm.slabs.map(s => s.id));
+  const activeBeams = mm.beams.filter(b => b.slabs.some(sid => activeSlab.has(sid)));
+
+  console.log(
+    `[Phase10] getConnectedSlabResults: ${mm.slabs.length} slabs, ` +
+    `${activeBeams.length} beams  meshDensity=${meshDensity}`,
+  );
+
+  const result = solveConnectedSlabs(
+    mm.slabs,
+    activeBeams,
+    mm.columns,
+    slabProps,
+    mat,
+    q_Nmm2,
+    meshDensity,
+  );
+
+  // Return as MergedResult[] (single-element) so adaptFEMResults works unchanged
+  return [result as unknown as MergedResult];
 }
