@@ -139,6 +139,63 @@ interface SharedNodeEntry {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Geometric beam-node collector
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Collect all slab mesh nodes that lie on a given beam, using geometric
+ * proximity rather than the node.beamId field.
+ *
+ * WHY: corner nodes (shared by two perpendicular beams) carry beamId of only
+ * the FIRST beam that claimed them during mesh classification.  Using beamId
+ * alone causes the second beam to miss its two corner nodes (19 instead of 21
+ * for a 5 × 5 m slab at density 4), breaking symmetry and producing wildly
+ * incorrect end moments (−40 kN·m where <10 kN·m is expected).
+ *
+ * The geometric check:
+ *   t = ((P − A) · (B − A)) / |B − A|²    parametric projection onto beam
+ *   d = |P − (A + t·(B − A))|             perpendicular distance
+ *   On beam  ⟺  d < EPS_MM  and  0 ≤ t ≤ 1.
+ *
+ * Returns nodes sorted by parameter t (start → end of beam).
+ */
+const EPS_GEOM_MM = 1.0;   // 1 mm tolerance (grid spacing is 50–250 mm)
+
+function collectBeamNodes(
+  nodes:  import('./types').FEMNode[],
+  beam:   import('./types').Beam,
+  Lbeam:  number,
+): { slabNodeIdx: number; beamPos: number }[] {
+
+  if (Lbeam < 1e-6) return [];
+
+  const ax = beam.x1;
+  const ay = beam.y1;
+  const dx = beam.x2 - beam.x1;
+  const dy = beam.y2 - beam.y1;
+  const L2 = Lbeam * Lbeam;
+
+  const result: { slabNodeIdx: number; beamPos: number }[] = [];
+
+  for (let ni = 0; ni < nodes.length; ni++) {
+    const nd = nodes[ni];
+    // Parametric projection: t in [0, 1] for points on the segment
+    const t = ((nd.x - ax) * dx + (nd.y - ay) * dy) / L2;
+    if (t < -EPS_GEOM_MM / Lbeam || t > 1 + EPS_GEOM_MM / Lbeam) continue;
+    // Perpendicular distance from beam axis
+    const px = ax + t * dx;
+    const py = ay + t * dy;
+    const dist = Math.hypot(nd.x - px, nd.y - py);
+    if (dist < EPS_GEOM_MM) {
+      result.push({ slabNodeIdx: ni, beamPos: Math.max(0, Math.min(1, t)) });
+    }
+  }
+
+  result.sort((a, b) => a.beamPos - b.beamPos);
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DOF scatter helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -282,24 +339,18 @@ export function solveMergedDOFSystem(
   for (const beam of beams) {
     if (!beam.slabs.includes(slab.id)) continue;
 
-    // Collect beam nodes (slab mesh nodes lying on this beam)
-    const beamNodes: { slabNodeIdx: number; beamPos: number }[] = [];
-    for (let ni = 0; ni < nSlab; ni++) {
-      if (nodes[ni].beamId === beam.id) {
-        beamNodes.push({ slabNodeIdx: ni, beamPos: nodes[ni].beamPos });
-      }
-    }
-    if (beamNodes.length < 2) continue;
-
-    beamNodes.sort((a, b) => a.beamPos - b.beamPos);
-
-    // Beam direction cosines
+    // Beam direction cosines (computed first so collectBeamNodes can use Lbeam)
     const dx = beam.x2 - beam.x1;
     const dy = beam.y2 - beam.y1;
     const Lbeam = Math.hypot(dx, dy);
     if (Lbeam < 1e-6) continue;
     const cosA = dx / Lbeam;
     const sinA = dy / Lbeam;
+
+    // Collect beam nodes using GEOMETRIC PROXIMITY (not beamId) so that corner
+    // nodes shared by two beams appear in BOTH beams' node lists.
+    const beamNodes = collectBeamNodes(nodes, beam, Lbeam);
+    if (beamNodes.length < 2) continue;
 
     // Assemble each sub-element between consecutive beam nodes
     for (let ei = 0; ei < beamNodes.length - 1; ei++) {
@@ -464,21 +515,16 @@ export function solveMergedDOFSystem(
   for (const beam of beams) {
     if (!beam.slabs.includes(slab.id)) continue;
 
-    const beamNodes: { slabNodeIdx: number; beamPos: number }[] = [];
-    for (let ni = 0; ni < nSlab; ni++) {
-      if (nodes[ni].beamId === beam.id) {
-        beamNodes.push({ slabNodeIdx: ni, beamPos: nodes[ni].beamPos });
-      }
-    }
-    if (beamNodes.length < 2) continue;
-    beamNodes.sort((a, b) => a.beamPos - b.beamPos);
-
     const dx    = beam.x2 - beam.x1;
     const dy    = beam.y2 - beam.y1;
     const Lbeam = Math.hypot(dx, dy);
     if (Lbeam < 1e-6) continue;
     const cosA = dx / Lbeam;
     const sinA = dy / Lbeam;
+
+    // Use geometric proximity (same fix as step 5) to capture corner nodes
+    const beamNodes = collectBeamNodes(nodes, beam, Lbeam);
+    if (beamNodes.length < 2) continue;
 
     const momentList: number[] = [];
     const shearList:  number[] = [];
