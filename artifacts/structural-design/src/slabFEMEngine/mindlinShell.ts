@@ -36,21 +36,21 @@ import type { SlabProps, MatProps } from './types';
 // Stiffness reduction factor for FEM slab analysis
 //
 // Per the project requirement (and consistent with ACI 318 §6.6.3.1 which
-// specifies 0.25Ig for cracked slabs under lateral/gravity analysis), the FEM
-// engine reduces ALL slab element stiffnesses by 25 % before assembly.
+// specifies 0.25Ig for cracked slabs), the FEM engine uses 25 % of the gross
+// section stiffness for ALL slab elements before assembly.
 //
-//   Effective Db = SLAB_STIFFNESS_REDUCTION × (Ec·t³/12(1-ν²))
-//   Effective Ds = SLAB_STIFFNESS_REDUCTION × (ks·G·t)
+//   Effective Db = 0.25 × (Ec·t³/12(1-ν²))
+//   Effective Ds = 0.25 × (ks·G·t)
 //
 // Consequence:
-//   • Global stiffness matrix K is 25 % softer → deflections increase by 33 %.
-//   • Moment recovery uses the SAME reduced D so computed M are consistent.
-//   • For isostatic cases (simply-supported) moments are unchanged by stiffness;
-//     for indeterminate cases (flat plates, multi-span) the redistribution is
-//     slightly affected — this is the intended behaviour.
+//   • Global stiffness matrix K = 25 % of gross → deflections increase by 4×.
+//   • Moment recovery uses the SAME 0.25·Ig so computed M are consistent.
+//   • For isostatic cases moments are unchanged by absolute stiffness;
+//     for indeterminate cases (flat plates, multi-span) redistribution is
+//     affected — this is the intended behaviour.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const SLAB_STIFFNESS_REDUCTION = 0.75;   // 25 % reduction
+export const SLAB_STIFFNESS_REDUCTION = 0.25;   // stiffness becomes 25 % of gross section
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public: compute element stiffness matrix (12 × 12, row-major)
