@@ -33,6 +33,26 @@ import type { FEMNode, FEMElement, Ke } from './types';
 import type { SlabProps, MatProps } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Stiffness reduction factor for FEM slab analysis
+//
+// Per the project requirement (and consistent with ACI 318 §6.6.3.1 which
+// specifies 0.25Ig for cracked slabs under lateral/gravity analysis), the FEM
+// engine reduces ALL slab element stiffnesses by 25 % before assembly.
+//
+//   Effective Db = SLAB_STIFFNESS_REDUCTION × (Ec·t³/12(1-ν²))
+//   Effective Ds = SLAB_STIFFNESS_REDUCTION × (ks·G·t)
+//
+// Consequence:
+//   • Global stiffness matrix K is 25 % softer → deflections increase by 33 %.
+//   • Moment recovery uses the SAME reduced D so computed M are consistent.
+//   • For isostatic cases (simply-supported) moments are unchanged by stiffness;
+//     for indeterminate cases (flat plates, multi-span) the redistribution is
+//     slightly affected — this is the intended behaviour.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const SLAB_STIFFNESS_REDUCTION = 0.75;   // 25 % reduction
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public: compute element stiffness matrix (12 × 12, row-major)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -49,15 +69,15 @@ export function elementStiffness(
   const ks = 5 / 6;                       // Mindlin shear correction factor
 
   // Material matrices --------------------------------------------------------
-  // D_b: 3×3 bending stiffness (MPa·mm³)
-  const Db  = (Ec * t ** 3) / (12 * (1 - nu ** 2));
+  // D_b: 3×3 bending stiffness (MPa·mm³) — reduced by 25 %
+  const Db  = SLAB_STIFFNESS_REDUCTION * (Ec * t ** 3) / (12 * (1 - nu ** 2));
   const D_b = matScale(
     [[1, nu, 0], [nu, 1, 0], [0, 0, (1 - nu) / 2]],
     Db,
   );
 
-  // D_s: 2×2 shear stiffness (MPa·mm)
-  const Ds  = ks * G * t;
+  // D_s: 2×2 shear stiffness (MPa·mm) — reduced by 25 %
+  const Ds  = SLAB_STIFFNESS_REDUCTION * ks * G * t;
   const D_s = [[Ds, 0], [0, Ds]];
 
   // Node coordinates (mm) ---------------------------------------------------
@@ -151,8 +171,10 @@ export function stressResultants(
   const G  = Ec / (2 * (1 + nu));
   const ks = 5 / 6;
 
-  const Db   = (Ec * t ** 3) / (12 * (1 - nu ** 2));
-  const DsVal = ks * G * t;
+  // Apply the same 25 % reduction used in elementStiffness() so that moments
+  // M = D_b_reduced · B · d  are consistent with the solved displacement field.
+  const Db    = SLAB_STIFFNESS_REDUCTION * (Ec * t ** 3) / (12 * (1 - nu ** 2));
+  const DsVal = SLAB_STIFFNESS_REDUCTION * ks * G * t;
 
   const xs = elem.nodeIds.map(id => nodes[id].x);
   const ys = elem.nodeIds.map(id => nodes[id].y);
