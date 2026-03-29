@@ -617,29 +617,51 @@ export function generateFrames(beams: Beam[]): Frame[] {
 
 // ===================== LOADS =====================
 /**
- * Calculate beam loads from adjacent slabs with PARTIAL CONTACT support.
- * 
- * For irregular buildings, a beam may not span the full length of a slab edge.
- * Multiple shorter beams may share one slab edge. Each beam receives load
- * proportional to its contact distance with the slab edge.
- * 
- * Contact distance = overlap between beam extent and slab edge extent.
- * Contact ratio = contact distance / full slab edge length on that side.
- * 
- * Load formulas (from slab yield-line theory):
- *   Trapezoidal (long side): W = w * S * (3L² - S²) / (6L²)  → simplified: w*lx*(3 - (lx/ly)²)/6
- *   Triangular (short side): W = w * S / 4  → simplified: w*lx/3 (conservative, from lx/4 * 4/3 continuity)
- * 
- * The final load is scaled by contactRatio = overlapLength / beamLength
- * This ensures the UDL on the beam correctly represents the partial tributary area.
+ * Calculate beam loads from adjacent slabs — ETABS-equivalent tributary area method.
+ *
+ * ─── METHODOLOGY ────────────────────────────────────────────────────────────
+ * Matches ETABS "No Slab Stiffness" / Tributary Area load distribution.
+ *
+ * ONE-WAY SLABS  (β = ly/lx > 2)  — ACI 318-19 §8.5, Table 8.10.3
+ *   The slab spans entirely in the SHORT direction (lx).
+ *   All load goes to the LONG-SIDE beams (the beams the slab spans BETWEEN).
+ *   Short-side beams carry ZERO slab load (same as ETABS one-way strip).
+ *
+ *   Long-side beam (spanning beam):
+ *     W = w × lx / 2   (kN/m — full tributary half-width on each side)
+ *
+ *   Short-side beam:
+ *     W = 0             (no load — slab spans away from this beam)
+ *
+ * TWO-WAY SLABS  (β = ly/lx ≤ 2)  — ACI 318-19 §8.10, yield-line theory
+ *   Yield-line 45° lines from corners divide the slab into trapezoids/triangles.
+ *
+ *   Long-side beam (trapezoidal tributary):
+ *     W_eq = w × lx × (3 − β²) / 6   [kN/m, equivalent UDL for same max moment]
+ *     Derivation: trapezoidal area A = lx/2 × (ly − lx/3); equivalent UDL
+ *     w_eq = w × A/ly gives the total load; the formula above redistributes
+ *     it as a UDL producing the same midspan moment as the actual trapezoid.
+ *     Fixed-end moment factor: FEM = w × lx × (3 − β²) / 6 × L² / 12
+ *
+ *   Short-side beam (triangular tributary):
+ *     W_eq = w × lx / 3              [kN/m, equivalent UDL for same max moment]
+ *     Derivation: triangular area A = lx²/4; equivalent UDL w_eq = 2/3 × w_peak
+ *     where w_peak = w × lx/2, giving w_eq = w × lx/3.
+ *
+ * PARTIAL CONTACT  (irregular grids)
+ *   contactRatio = overlapLength / beamLength adjusts for beams shorter than
+ *   the full slab edge.  This is consistent with ETABS automatic load-to-frame.
+ *
+ * UNITS: w in kN/m², lx/ly in m → W in kN/m (UDL on beam).
+ * ────────────────────────────────────────────────────────────────────────────
  */
 export function calculateBeamLoads(
   beam: Beam, slabs: Slab[], slabProps: SlabProps, mat: MatProps
 ): { deadLoad: number; liveLoad: number } {
   const ownWeight = (slabProps.thickness / 1000) * mat.gamma;
-  const wDL = ownWeight + slabProps.finishLoad;
-  const wLL = slabProps.liveLoad;
-  const beamSW = (beam.b / 1000) * (beam.h / 1000) * mat.gamma;
+  const wDL = ownWeight + slabProps.finishLoad;   // Dead load intensity (kN/m²)
+  const wLL = slabProps.liveLoad;                 // Live load intensity (kN/m²)
+  const beamSW = (beam.b / 1000) * (beam.h / 1000) * mat.gamma; // Beam self-weight (kN/m)
   let dlTotal = beamSW;
   let llTotal = 0;
   const EPS = 1e-6;
@@ -647,52 +669,68 @@ export function calculateBeamLoads(
   for (const slabId of beam.slabs) {
     const slab = slabs.find(s => s.id === slabId);
     if (!slab) continue;
-    
-    const slabLx_raw = Math.abs(slab.x2 - slab.x1); // slab X dimension
-    const slabLy_raw = Math.abs(slab.y2 - slab.y1); // slab Y dimension
-    const lx = Math.min(slabLx_raw, slabLy_raw); // short span
-    const ly = Math.max(slabLx_raw, slabLy_raw); // long span
 
-    // Determine which slab edge this beam lies on and compute contact distance
+    const slabLx_raw = Math.abs(slab.x2 - slab.x1); // slab X dimension (m)
+    const slabLy_raw = Math.abs(slab.y2 - slab.y1); // slab Y dimension (m)
+    const lx = Math.min(slabLx_raw, slabLy_raw);    // short span (m)
+    const ly = Math.max(slabLx_raw, slabLy_raw);    // long span (m)
+    if (lx < EPS) continue;                         // degenerate slab
+
+    // ── Determine which edge this beam lies on ─────────────────────────────
     const isBeamHorizontal = beam.direction === 'horizontal';
     let slabEdgeLength: number;
     let contactDistance: number;
 
     if (isBeamHorizontal) {
-      // Beam is horizontal (constant Y). Slab edge is along X direction.
       slabEdgeLength = slabLx_raw;
-      // Overlap between beam X-range and slab X-range
       const overlapStart = Math.max(beam.x1, Math.min(slab.x1, slab.x2));
-      const overlapEnd = Math.min(beam.x2, Math.max(slab.x1, slab.x2));
+      const overlapEnd   = Math.min(beam.x2, Math.max(slab.x1, slab.x2));
       contactDistance = Math.max(0, overlapEnd - overlapStart);
     } else {
-      // Beam is vertical (constant X). Slab edge is along Y direction.
       slabEdgeLength = slabLy_raw;
-      // Overlap between beam Y-range and slab Y-range
       const overlapStart = Math.max(beam.y1, Math.min(slab.y1, slab.y2));
-      const overlapEnd = Math.min(beam.y2, Math.max(slab.y1, slab.y2));
+      const overlapEnd   = Math.min(beam.y2, Math.max(slab.y1, slab.y2));
       contactDistance = Math.max(0, overlapEnd - overlapStart);
     }
 
-    // Contact ratio: how much of this slab's load goes to this beam
-    // If beam spans the full edge, ratio = 1.0
     const contactRatio = beam.length > EPS ? contactDistance / beam.length : 0;
     if (contactRatio < EPS) continue;
 
-    // Determine if this edge is the long side or short side of the slab
+    // isLongSide: true  → beam is on the LONG edge (the two beams the slab SPANS BETWEEN)
+    //             false → beam is on the SHORT edge (parallel to span, small tributary)
     const isLongSide = slabEdgeLength >= ly - 0.01;
-    
-    if (isLongSide) {
-      // Trapezoidal load: W = w * lx * (3 - (lx/ly)²) / 6
-      const factor = lx * (3 - (lx / ly) ** 2) / 6;
-      dlTotal += wDL * factor * contactRatio;
-      llTotal += wLL * factor * contactRatio;
+    const beta = ly / lx;  // aspect ratio (≥ 1 always)
+
+    let factor: number;
+
+    if (beta > 2.0) {
+      // ── ONE-WAY SLAB: all load to long-side (spanning) beams ─────────────
+      // Same as ETABS one-way strip model (ACI 318-19 §8.5).
+      // The slab acts as a series of parallel strips spanning lx.
+      // Each strip of width 1m delivers w×lx/2 to each long-side beam.
+      if (isLongSide) {
+        factor = lx / 2;   // kN/m — full one-way tributary width
+      } else {
+        factor = 0;         // Short-side beams carry nothing in one-way case
+      }
     } else {
-      // Triangular load: W = w * lx / 3
-      const factor = lx / 3;
-      dlTotal += wDL * factor * contactRatio;
-      llTotal += wLL * factor * contactRatio;
+      // ── TWO-WAY SLAB: yield-line distribution ────────────────────────────
+      if (isLongSide) {
+        // Trapezoidal tributary → equivalent UDL
+        // W_eq = w × lx × (3 − (lx/ly)²) / 6
+        // At β=1 (square): W_eq = w × lx × (3−1)/6 = w×lx/3
+        // At β=2 (boundary): W_eq = w × lx × (3−0.25)/6 ≈ 0.458 × w×lx
+        factor = lx * (3 - (lx / ly) ** 2) / 6;
+      } else {
+        // Triangular tributary → equivalent UDL for same max sagging moment
+        // W_eq = w × lx / 3  (= 2/3 × w_peak where w_peak = w × lx/2)
+        factor = lx / 3;
+      }
     }
+
+    if (factor < EPS) continue;
+    dlTotal += wDL * factor * contactRatio;
+    llTotal += wLL * factor * contactRatio;
   }
   return { deadLoad: dlTotal, liveLoad: llTotal };
 }
