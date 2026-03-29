@@ -8,7 +8,7 @@
  *   - nodeI = أسفل العمود (Bot), nodeJ = أعلى العمود (Top)
  */
 
-import type { Beam, Column, Frame, FrameResult, MatProps, BeamOnBeamConnection } from '@/lib/structuralEngine';
+import type { Beam, Column, Frame, FrameResult, MatProps, BeamOnBeamConnection, Slab, SlabProps } from '@/lib/structuralEngine';
 import { analyze3DFrame, type Node3D, type Element3D, type Model3D, type LoadCase3D } from '@/lib/solver3D';
 
 export interface ColumnLoads3D {
@@ -69,6 +69,8 @@ function build3DModelWithPatternLoading(
   mat: MatProps,
   frameEndReleases?: EndReleaseMap,
   beamOnBeamConnections?: BeamOnBeamConnection[],
+  slabs?: Slab[],
+  slabProps?: SlabProps,
 ): { model: Model3D; patternCases: LoadCase3D[]; primaryBeamSplitIds: Map<string, string> } {
   const beamsMap = new Map(beams.map(b => [b.id, b]));
   const E = 4700 * Math.sqrt(mat.fc) * 1000; // MPa → kPa (kN/m²) — consistent with kN/m loads
@@ -364,6 +366,119 @@ function build3DModelWithPatternLoading(
 
   const model: Model3D = { nodes: Array.from(nodesMap.values()), elements: elements3d };
 
+  // ── ETABS-equivalent slab load profiles (non-uniform FEF correction) ──────
+  // For two-way slab beams (β ≤ 2), the slab load distribution is:
+  //   Long-side beams  → Trapezoidal  (zero at corners → max at plateau → zero)
+  //   Short-side beams → Triangular   (zero at ends → peak at midspan → zero)
+  // Using equivalent UDL over-estimates fixed-end moments by ~7–11%.
+  // We now track the ACTUAL peak load intensity and normalised profile shape for
+  // each qualifying element so the solver can apply Gauss-quadrature FEF.
+  //
+  // Only applied to:
+  //   • Non-split (no _A/_B suffix) beam elements
+  //   • Beams bordering exactly ONE slab
+  //   • Contact ratio ≥ 0.85 (essentially full-contact)
+  //   • Two-way slabs (β = ly/lx ≤ 2.0)
+  // ──────────────────────────────────────────────────────────────────────────
+  interface ElemSlabProfile {
+    /** DL peak intensity at SERVICE level (kN/m) — at the point of max tributary width */
+    wPeak_DL_service: number;
+    /** LL peak intensity at SERVICE level (kN/m) */
+    wPeak_LL_service: number;
+    /** Factored UNIFORM dead load (1.2 × [beamSW + wallLoad]), replaces beamDeadLoads for UDL */
+    uniformDL_factored: number;
+    /** Normalised profile shape — t ∈ [0,1], m = multiplier (peak = 1.0) */
+    shape: Array<{ t: number; m: number }>;
+  }
+
+  const elemSlabProfiles = new Map<string, ElemSlabProfile>();
+
+  if (slabs && slabs.length > 0 && slabProps) {
+    // Service-level intensities (kN/m²)
+    const wDL_service = (slabProps.thickness / 1000) * mat.gamma + slabProps.finishLoad;
+    const wLL_service = slabProps.liveLoad;
+
+    for (const elem of elements3d) {
+      if (elem.type !== 'beam') continue;
+      // Skip split sub-elements — profile remapping across a split is non-trivial;
+      // the UDL approximation is retained for these elements.
+      if (elem.id.endsWith('_A') || elem.id.endsWith('_B')) continue;
+
+      const baseBeamId = elem.id.replace(/^beam_/, '');
+      const beam = beamsMap.get(baseBeamId);
+      if (!beam || beam.slabs.length !== 1) continue;
+
+      const slab = slabs.find(s => s.id === beam.slabs[0]);
+      if (!slab) continue;
+
+      const slabW = Math.abs(slab.x2 - slab.x1); // m
+      const slabH = Math.abs(slab.y2 - slab.y1); // m
+      const lx = Math.min(slabW, slabH);           // short span (m)
+      const ly = Math.max(slabW, slabH);            // long span (m)
+      if (lx < 0.1) continue;
+
+      const beta = ly / lx;
+      if (beta > 2.0) continue; // one-way slab — UDL is already exact for these
+
+      // Determine which edge of the slab this beam spans
+      const slabEdge = beam.direction === 'horizontal' ? slabW : slabH;
+      const isLongSide = slabEdge >= ly - 0.01;
+
+      // Contact ratio: fraction of beam length that overlaps the slab
+      let contactLen: number;
+      if (beam.direction === 'horizontal') {
+        const s = Math.max(beam.x1, Math.min(slab.x1, slab.x2));
+        const e = Math.min(beam.x2, Math.max(slab.x1, slab.x2));
+        contactLen = Math.max(0, e - s);
+      } else {
+        const s = Math.max(beam.y1, Math.min(slab.y1, slab.y2));
+        const e = Math.min(beam.y2, Math.max(slab.y1, slab.y2));
+        contactLen = Math.max(0, e - s);
+      }
+      const contactRatio = beam.length > 1e-6 ? contactLen / beam.length : 0;
+      if (contactRatio < 0.85) continue; // skip partially overlapping beams
+
+      // Peak load intensity = slab load (kN/m²) × max tributary width = lx/2
+      // This is the actual MAXIMUM ordinate of the non-uniform load diagram.
+      const wPeak_DL = wDL_service * (lx / 2) * contactRatio; // kN/m
+      const wPeak_LL = wLL_service * (lx / 2) * contactRatio; // kN/m
+
+      // Beam self-weight + wall load (always uniform — no profile correction needed)
+      const beamSW = (beam.b / 1000) * (beam.h / 1000) * mat.gamma;
+      const wallLoad = beam.wallLoad ?? 0;
+      const uniformDL_factored = 1.2 * (beamSW + wallLoad);
+
+      // Normalised profile shape (multiplier: 0 → 1 → 1 → 0 or 0 → 1 → 0)
+      let shape: Array<{ t: number; m: number }>;
+      if (isLongSide) {
+        // Trapezoidal: ramp over each end of length (lx/2), plateau in middle
+        const a = Math.min(lx / (2 * ly), 0.499); // normalised ramp fraction
+        shape = [{ t: 0, m: 0 }, { t: a, m: 1 }, { t: 1 - a, m: 1 }, { t: 1, m: 0 }];
+      } else {
+        // Triangular: zero at ends, peak at midspan
+        shape = [{ t: 0, m: 0 }, { t: 0.5, m: 1 }, { t: 1, m: 0 }];
+      }
+
+      elemSlabProfiles.set(elem.id, { wPeak_DL_service: wPeak_DL, wPeak_LL_service: wPeak_LL, uniformDL_factored, shape });
+
+      // IMPORTANT: Override beamDeadLoads / beamLiveLoads so the UDL load case
+      // only carries the UNIFORM portion (SW + wall).  The slab contribution is
+      // now encoded entirely in the profile (elementLoadProfiles in each load case).
+      beamDeadLoads.set(elem.id, uniformDL_factored); // already at 1.2D level
+      beamLiveLoads.set(elem.id, 0);                  // LL moved to profile
+    }
+  }
+
+  /** Build factored profile points for one element-load-case combination. */
+  const buildProfile = (
+    prof: ElemSlabProfile,
+    factorDL: number,
+    factorLL: number,
+  ): Array<{ t: number; wy: number }> => {
+    const scale = -(factorDL * prof.wPeak_DL_service + factorLL * prof.wPeak_LL_service);
+    return prof.shape.map(pt => ({ t: pt.t, wy: scale * pt.m }));
+  };
+
   // ── Pattern loading cases — PER FRAME (ACI 318-19 §6.4.3) ───────────────
   // Per-frame approach: alternating live load pattern is applied independently
   // within each frame, not globally across the whole building.
@@ -371,23 +486,35 @@ function build3DModelWithPatternLoading(
 
   // Base: 1.4D only
   {
-    const loads = new Map<string, { wx: number; wy: number; wz: number }>();
+    const loads    = new Map<string, { wx: number; wy: number; wz: number }>();
+    const profiles = new Map<string, Array<{ t: number; wy: number }>>();
     for (const eid of allBeamElemIds) {
       const wD = beamDeadLoads.get(eid) ?? 0;
       loads.set(eid, { wx: 0, wy: 0, wz: -(1.4 / 1.2) * wD });
+      const prof = elemSlabProfiles.get(eid);
+      if (prof) profiles.set(eid, buildProfile(prof, 1.4, 0));
     }
-    patternCases.push({ id: 'case_1.4D', name: '1.4D', type: 'dead', elementLoads: loads });
+    patternCases.push({
+      id: 'case_1.4D', name: '1.4D', type: 'dead', elementLoads: loads,
+      elementLoadProfiles: profiles.size > 0 ? profiles : undefined,
+    });
   }
 
   // Full load: 1.2D + 1.6L (all spans)
   {
-    const loads = new Map<string, { wx: number; wy: number; wz: number }>();
+    const loads    = new Map<string, { wx: number; wy: number; wz: number }>();
+    const profiles = new Map<string, Array<{ t: number; wy: number }>>();
     for (const eid of allBeamElemIds) {
       const wD = beamDeadLoads.get(eid) ?? 0;
       const wL = beamLiveLoads.get(eid) ?? 0;
       loads.set(eid, { wx: 0, wy: 0, wz: -(wD + wL) });
+      const prof = elemSlabProfiles.get(eid);
+      if (prof) profiles.set(eid, buildProfile(prof, 1.2, 1.6));
     }
-    patternCases.push({ id: 'case_full', name: '1.2D+1.6L', type: 'dead', elementLoads: loads });
+    patternCases.push({
+      id: 'case_full', name: '1.2D+1.6L', type: 'dead', elementLoads: loads,
+      elementLoadProfiles: profiles.size > 0 ? profiles : undefined,
+    });
   }
 
   // Per-frame alternating live-load patterns
@@ -396,11 +523,15 @@ function build3DModelWithPatternLoading(
     const nSpans = Math.min(fEids.length, 8); // cap at 2^8 = 256 combinations
     const totalPatterns = Math.pow(2, nSpans);
     for (let mask = 1; mask < totalPatterns - 1; mask++) {
-      const loads = new Map<string, { wx: number; wy: number; wz: number }>();
+      const loads    = new Map<string, { wx: number; wy: number; wz: number }>();
+      const profiles = new Map<string, Array<{ t: number; wy: number }>>();
+
       // Start with dead-only on all building beams
       for (const eid of allBeamElemIds) {
         const wD = beamDeadLoads.get(eid) ?? 0;
         loads.set(eid, { wx: 0, wy: 0, wz: -wD });
+        const prof = elemSlabProfiles.get(eid);
+        if (prof) profiles.set(eid, buildProfile(prof, 1.2, 0)); // DL only initially
       }
       // Apply live load to selected spans within this frame
       fEids.forEach((eid, i) => {
@@ -410,6 +541,8 @@ function build3DModelWithPatternLoading(
           const wD = beamDeadLoads.get(eid) ?? 0;
           const wL = beamLiveLoads.get(eid) ?? 0;
           loads.set(eid, { wx: 0, wy: 0, wz: -(wD + wL) });
+          const prof = elemSlabProfiles.get(eid);
+          if (prof) profiles.set(eid, buildProfile(prof, 1.2, 1.6)); // upgrade to DL+LL
         }
       });
       patternCases.push({
@@ -417,22 +550,38 @@ function build3DModelWithPatternLoading(
         name: `Frame ${frameId} Pattern ${mask}`,
         type: 'dead',
         elementLoads: loads,
+        elementLoadProfiles: profiles.size > 0 ? profiles : undefined,
       });
     }
   }
 
   // Guard: if no per-frame patterns were generated (only 1 beam per frame), add even/odd
   if (patternCases.length <= 2 && allBeamElemIds.length > 1) {
-    const loadsEven = new Map<string, { wx: number; wy: number; wz: number }>();
-    const loadsOdd  = new Map<string, { wx: number; wy: number; wz: number }>();
+    const loadsEven    = new Map<string, { wx: number; wy: number; wz: number }>();
+    const loadsOdd     = new Map<string, { wx: number; wy: number; wz: number }>();
+    const profilesEven = new Map<string, Array<{ t: number; wy: number }>>();
+    const profilesOdd  = new Map<string, Array<{ t: number; wy: number }>>();
     allBeamElemIds.forEach((eid, i) => {
       const wD = beamDeadLoads.get(eid) ?? 0;
       const wL = beamLiveLoads.get(eid) ?? 0;
-      loadsEven.set(eid, { wx: 0, wy: 0, wz: -(wD + (i % 2 === 0 ? wL : 0)) });
-      loadsOdd .set(eid, { wx: 0, wy: 0, wz: -(wD + (i % 2 === 1 ? wL : 0)) });
+      const llEven = i % 2 === 0;
+      const llOdd  = i % 2 === 1;
+      loadsEven.set(eid, { wx: 0, wy: 0, wz: -(wD + (llEven ? wL : 0)) });
+      loadsOdd .set(eid, { wx: 0, wy: 0, wz: -(wD + (llOdd  ? wL : 0)) });
+      const prof = elemSlabProfiles.get(eid);
+      if (prof) {
+        profilesEven.set(eid, buildProfile(prof, 1.2, llEven ? 1.6 : 0));
+        profilesOdd .set(eid, buildProfile(prof, 1.2, llOdd  ? 1.6 : 0));
+      }
     });
-    patternCases.push({ id: 'case_even', name: 'Even LL', type: 'dead', elementLoads: loadsEven });
-    patternCases.push({ id: 'case_odd',  name: 'Odd LL',  type: 'dead', elementLoads: loadsOdd  });
+    patternCases.push({
+      id: 'case_even', name: 'Even LL', type: 'dead', elementLoads: loadsEven,
+      elementLoadProfiles: profilesEven.size > 0 ? profilesEven : undefined,
+    });
+    patternCases.push({
+      id: 'case_odd', name: 'Odd LL', type: 'dead', elementLoads: loadsOdd,
+      elementLoadProfiles: profilesOdd.size > 0 ? profilesOdd : undefined,
+    });
   }
 
   return { model, patternCases, primaryBeamSplitIds };

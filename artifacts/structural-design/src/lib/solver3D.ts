@@ -63,10 +63,28 @@ export interface LoadCase3D {
   id: string;
   name: string;
   type: 'dead' | 'live' | 'wind' | 'seismic';
-  /** Element loads: elementId → { wx, wy, wz } in global coords (kN/m) */
+  /** Element loads: elementId → { wx, wy, wz } in global coords (kN/m).
+   *  For elements with a non-uniform slab profile, this contains ONLY the
+   *  uniform portion (beam self-weight + wall load).  The slab load is
+   *  encoded in elementLoadProfiles. */
   elementLoads: Map<string, { wx: number; wy: number; wz: number }>;
   /** Nodal loads: nodeId → [Fx, Fy, Fz, Mx, My, Mz] (kN, kN.m) */
   nodalLoads?: Map<string, number[]>;
+  /**
+   * Non-uniform slab load profiles for BEAM elements — local Y direction (kN/m).
+   * For horizontal beams, local Y = global Z (upward), so gravity loads are negative.
+   *
+   * When present for an element, the profile FEF is ADDED to the UDL FEF from
+   * elementLoads (which already handles beam self-weight + wall as uniform load).
+   *
+   * Profile points: t ∈ [0,1] (normalised position I→J), wy in kN/m.
+   *
+   * Shapes stored:
+   *   Two-way long-side  → Trapezoidal: [(0,0),(a,peak),(1-a,peak),(1,0)]
+   *   Two-way short-side → Triangular:  [(0,0),(0.5,peak),(1,0)]
+   *   One-way long-side  → Uniform:     [(0,peak),(1,peak)]
+   */
+  elementLoadProfiles?: Map<string, Array<{t: number; wy: number}>>;
 }
 
 export interface LoadCombination3D {
@@ -341,6 +359,91 @@ function fixedEndForcesUDL(
   fef[8] = wz * L / 2;           // Fz at J
   fef[10] = wz * L * L / 12;     // My at J
   
+  return fef;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 16-point Gauss-Legendre quadrature nodes & weights on [0, 1]
+// Used for non-uniform distributed-load FEF computation.
+// ──────────────────────────────────────────────────────────────────────────────
+const GL16_PTS: readonly number[] = [
+  0.00529953325, 0.02771248844, 0.06718439876, 0.12229779581,
+  0.19106187786, 0.27099161127, 0.35919822462, 0.45249374513,
+  0.54750625487, 0.64080177538, 0.72900838873, 0.80893812214,
+  0.87770220419, 0.93281560124, 0.97228751156, 0.99470046675,
+];
+const GL16_WTS: readonly number[] = [
+  0.01357622974, 0.03112676197, 0.04712743581, 0.06225352393,
+  0.07600592455, 0.08871109072, 0.09917359872, 0.10474107969,
+  0.10474107969, 0.09917359872, 0.08871109072, 0.07600592455,
+  0.06225352393, 0.04712743581, 0.03112676197, 0.01357622974,
+];
+
+/**
+ * Fixed-end forces for a NON-UNIFORM distributed load profile in the local Y
+ * direction — used to apply the actual trapezoidal / triangular slab load
+ * distribution as in ETABS, instead of the equivalent UDL approximation.
+ *
+ * Units:
+ *   L   — element length (mm, same as the rest of the solver)
+ *   wy  — load intensity (kN/m, negative = downward for horizontal beams)
+ *   FEF — forces in N, moments in N·mm  (1 kN/m × 1 mm = 1 N)
+ *
+ * Only populates DOFs:  1  (Fy_I), 5  (Mz_I), 7  (Fy_J), 11 (Mz_J)
+ * (bending in the local XY plane, i.e. the vertical plane for horizontal beams)
+ *
+ * Integration uses 16-point Gauss-Legendre quadrature on [0, 1] → then maps
+ * to [0, L] via x = t·L, dx = L·dt.
+ *
+ * Influence functions for a fixed–fixed beam (unit downward load at position x):
+ *   Fy_I shape  = (L-x)²·(L+2x) / L³
+ *   Fy_J shape  = x²·(3L-2x)   / L³
+ *   Mz_I shape  = x·(L-x)²     / L²   (positive = matches code sign convention)
+ *   Mz_J shape  = −x²·(L-x)    / L²
+ */
+function fixedEndForcesProfile(
+  L: number,
+  profile: ReadonlyArray<{ t: number; wy: number }>,
+): Float64Array {
+  const fef = new Float64Array(12);
+  if (!profile || profile.length < 2) return fef;
+
+  // Sort by t so the interpolation loop always works correctly
+  const pts = [...profile].sort((a, b) => a.t - b.t);
+
+  /** Linear interpolation of wy at normalised position t ∈ [0, 1] */
+  const interp = (t: number): number => {
+    if (t <= pts[0].t) return pts[0].wy;
+    if (t >= pts[pts.length - 1].t) return pts[pts.length - 1].wy;
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (t >= pts[i].t && t <= pts[i + 1].t) {
+        const dt = pts[i + 1].t - pts[i].t;
+        if (dt < 1e-10) return pts[i].wy;
+        return pts[i].wy + (pts[i + 1].wy - pts[i].wy) * (t - pts[i].t) / dt;
+      }
+    }
+    return 0;
+  };
+
+  for (let k = 0; k < 16; k++) {
+    const t  = GL16_PTS[k];
+    const gw = GL16_WTS[k];
+    const wy = interp(t);
+    if (Math.abs(wy) < 1e-14) continue;
+
+    const x  = t * L;
+    const dx = gw * L; // integration element (change of variable: dx = L·dt)
+
+    // Fy_I: (L-x)²·(L+2x) / L³
+    fef[1]  += wy * (L - x) * (L - x) * (L + 2 * x) / (L * L * L) * dx;
+    // Fy_J: x²·(3L-2x) / L³
+    fef[7]  += wy * x * x * (3 * L - 2 * x) / (L * L * L) * dx;
+    // Mz_I: x·(L-x)² / L²
+    fef[5]  += wy * x * (L - x) * (L - x) / (L * L) * dx;
+    // Mz_J: −x²·(L-x) / L²
+    fef[11] += -wy * x * x * (L - x) / (L * L) * dx;
+  }
+
   return fef;
 }
 
@@ -866,7 +969,34 @@ export function analyze3DFrame(
     
     // FEF in local, then transform to global
     // Convert kN/m to N/mm: × 1 (since we work in N/mm consistently)
-    const fef_local = fixedEndForcesUDL(L, totalLocalW.wx, totalLocalW.wy, totalLocalW.wz);
+    let fef_local = fixedEndForcesUDL(L, totalLocalW.wx, totalLocalW.wy, totalLocalW.wz);
+
+    // ── ETABS-equivalent non-uniform slab load profile ────────────────────────
+    // For horizontal beams with a trapezoidal/triangular slab tributary load,
+    // the standard UDL-equivalent FEF over-estimates fixed-end support moments
+    // by ~7–11%.  When a profile is supplied in the load case, we REPLACE the
+    // wy-direction FEF components (DOFs 1,5,7,11) with numerically integrated
+    // values from the actual non-uniform load shape.
+    //
+    // The profile is already in local Y units (kN/m, negative = downward) because
+    // for any horizontal beam, local Y = global Z (upward) regardless of plan
+    // orientation — the coordinate-system construction uses global Z as the
+    // "up" reference, so lcLocal.wy = loadGlobal.wz for every horizontal beam.
+    //
+    // elementLoads for such an element contains ONLY the UNIFORM portion (beam
+    // self-weight + wall load); the slab contribution lives entirely in the profile.
+    // ──────────────────────────────────────────────────────────────────────────
+    const wyProfile = loadCase.elementLoadProfiles?.get(elem.id);
+    if (wyProfile && wyProfile.length >= 2 && elem.type === 'beam') {
+      const fef_prof = fixedEndForcesProfile(L, wyProfile);
+      // Copy the base FEF array and ADD the profile contribution to wy DOFs
+      const combined = new Float64Array(fef_local);
+      combined[1]  += fef_prof[1];   // Fy at I
+      combined[5]  += fef_prof[5];   // Mz at I
+      combined[7]  += fef_prof[7];   // Fy at J
+      combined[11] += fef_prof[11];  // Mz at J
+      fef_local = combined;
+    }
     // Apply static condensation to FEF: F*_r = F_r - K_rc * K_cc^(-1) * F_c
     if (fef_needs_condensation && elem.releases) {
       const rI = elem.releases.nodeI;
