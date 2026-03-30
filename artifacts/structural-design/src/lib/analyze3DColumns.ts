@@ -226,7 +226,37 @@ function build3DModelWithPatternLoading(
   const primaryBeamSplitIds = new Map<string, string>(); // beamId → `${beamId}_A,${beamId}_B`
 
   if (beamOnBeamConnections && beamOnBeamConnections.length > 0) {
-    for (const conn of beamOnBeamConnections) {
+    // ── Topological multi-pass processing ──────────────────────────────────
+    // ETABS handles multi-level beam-on-beam (secondary on secondary on primary)
+    // correctly because all beams are in one global stiffness matrix.
+    // Here we replicate that by processing connections in dependency order:
+    //
+    //   Pass 1: connections whose primary beam already exists in elements3d
+    //           (i.e. it connects two real columns that have top-nodes)
+    //   Pass 2: connections whose primary is a secondary beam added in Pass 1
+    //   Pass N: repeat until all connections are processed or no progress
+    //
+    // This mirrors ETABS behaviour for chains like: S2 → S1 → P.
+    // ──────────────────────────────────────────────────────────────────────
+    const pending = [...beamOnBeamConnections];
+    const MAX_PASSES = pending.length + 1;
+
+    for (let pass = 0; pass < MAX_PASSES && pending.length > 0; pass++) {
+      const toProcess: typeof pending = [];
+      const toDefer:  typeof pending = [];
+
+      for (const conn of pending) {
+        const primaryBeamElemId = `beam_${conn.primaryBeamId}`;
+        const exists = elements3d.some(e => e.id === primaryBeamElemId);
+        (exists ? toProcess : toDefer).push(conn);
+      }
+
+      if (toProcess.length === 0) break; // no progress possible
+
+      pending.length = 0;
+      pending.push(...toDefer);
+
+      for (const conn of toProcess) {
       const primaryBeamElemId = `beam_${conn.primaryBeamId}`;
       const primaryElemIndex = elements3d.findIndex(e => e.id === primaryBeamElemId);
       if (primaryElemIndex < 0) continue;
@@ -361,40 +391,70 @@ function build3DModelWithPatternLoading(
           }
         }
       }
-    }
-  }
+    } // end for (const conn of toProcess) — inner loop
+    } // end for (let pass) — outer topological pass loop
+  } // end if (beamOnBeamConnections)
 
   const model: Model3D = { nodes: Array.from(nodesMap.values()), elements: elements3d };
 
   // ── ETABS-equivalent slab load profiles (non-uniform FEF correction) ──────
-  // For two-way slab beams (β ≤ 2), the slab load distribution is:
-  //   Long-side beams  → Trapezoidal  (zero at corners → max at plateau → zero)
-  //   Short-side beams → Triangular   (zero at ends → peak at midspan → zero)
-  // Using equivalent UDL over-estimates fixed-end moments by ~7–11%.
-  // We now track the ACTUAL peak load intensity and normalised profile shape for
-  // each qualifying element so the solver can apply Gauss-quadrature FEF.
   //
-  // Only applied to:
+  // ETABS "Membrane" (No Slab Stiffness) load distribution:
+  //   Two-way slabs (β ≤ 2): 45° yield lines from corners give
+  //     Long-side beams  → Trapezoidal  (0 → peak → peak → 0)   peak = w × lx/2
+  //     Short-side beams → Triangular   (0 → peak → 0)           peak = w × lx/2
+  //   One-way slabs (β > 2): uniform load on spanning beams = w × lx/2
+  //
+  // KEY IMPROVEMENT OVER OLD CODE:
+  //   Interior beams (adjacent to 2+ slabs) now accumulate contributions from
+  //   ALL adjacent slabs, matching ETABS superposition behaviour.
+  //   Previously only beams with exactly 1 slab got a non-uniform profile.
+  //
+  // Applied to:
   //   • Non-split (no _A/_B suffix) beam elements
-  //   • Beams bordering exactly ONE slab
-  //   • Contact ratio ≥ 0.85 (essentially full-contact)
-  //   • Two-way slabs (β = ly/lx ≤ 2.0)
+  //   • Beams with ≥ 1 adjacent slab and contact ratio > 0.1
+  //   • Skip beam if ALL adjacent slabs are one-way (UDL is exact for that case)
   // ──────────────────────────────────────────────────────────────────────────
+
   interface ElemSlabProfile {
-    /** DL peak intensity at SERVICE level (kN/m) — at the point of max tributary width */
-    wPeak_DL_service: number;
-    /** LL peak intensity at SERVICE level (kN/m) */
-    wPeak_LL_service: number;
-    /** Factored UNIFORM dead load (1.2 × [beamSW + wallLoad]), replaces beamDeadLoads for UDL */
+    /** Factored UNIFORM dead load (1.2 × [beamSW + wallLoad]) — carried via elementLoads */
     uniformDL_factored: number;
-    /** Normalised profile shape — t ∈ [0,1], m = multiplier (peak = 1.0) */
-    shape: Array<{ t: number; m: number }>;
+    /**
+     * Service-level DL slab profile — absolute intensities (kN/m) at normalised t ∈ [0,1].
+     * Sum of contributions from ALL adjacent slabs (superposition as in ETABS).
+     * Factored at load-case assembly: 1.2 × wy  (dead) or  1.4 × wy / 1.2  (1.4D case).
+     */
+    profileDL: Array<{ t: number; wy: number }>;
+    /**
+     * Service-level LL slab profile — absolute intensities (kN/m) at normalised t ∈ [0,1].
+     * Factored at load-case assembly: 1.6 × wy.
+     */
+    profileLL: Array<{ t: number; wy: number }>;
   }
+
+  // Standard t-sample points (21 points: 0, 0.05, …, 1.0).
+  // Fine enough to represent trapezoidal and triangular shapes with <0.5 % area error.
+  const PROFILE_T = Array.from({ length: 21 }, (_, i) => i / 20);
+
+  /** Linear interpolation of a piecewise-linear shape at position t. */
+  const interpShape = (t: number, shape: Array<{ t: number; m: number }>): number => {
+    if (shape.length === 0) return 0;
+    if (t <= shape[0].t) return shape[0].m;
+    if (t >= shape[shape.length - 1].t) return shape[shape.length - 1].m;
+    for (let i = 0; i < shape.length - 1; i++) {
+      if (t >= shape[i].t && t <= shape[i + 1].t) {
+        const dt = shape[i + 1].t - shape[i].t;
+        return dt < 1e-10
+          ? shape[i].m
+          : shape[i].m + (shape[i + 1].m - shape[i].m) * (t - shape[i].t) / dt;
+      }
+    }
+    return 0;
+  };
 
   const elemSlabProfiles = new Map<string, ElemSlabProfile>();
 
   if (slabs && slabs.length > 0 && slabProps) {
-    // Service-level intensities (kN/m²)
     const wDL_service = (slabProps.thickness / 1000) * mat.gamma + slabProps.finishLoad;
     const wLL_service = slabProps.liveLoad;
 
@@ -406,77 +466,111 @@ function build3DModelWithPatternLoading(
 
       const baseBeamId = elem.id.replace(/^beam_/, '');
       const beam = beamsMap.get(baseBeamId);
-      if (!beam || beam.slabs.length !== 1) continue;
+      if (!beam || beam.slabs.length === 0) continue;
 
-      const slab = slabs.find(s => s.id === beam.slabs[0]);
-      if (!slab) continue;
+      // Accumulate load contributions at each t sample from ALL adjacent slabs
+      const accDL = new Float64Array(PROFILE_T.length); // kN/m at each t
+      const accLL = new Float64Array(PROFILE_T.length);
+      let hasTwoWaySlab = false; // true if any adjacent slab is two-way
 
-      const slabW = Math.abs(slab.x2 - slab.x1); // m
-      const slabH = Math.abs(slab.y2 - slab.y1); // m
-      const lx = Math.min(slabW, slabH);           // short span (m)
-      const ly = Math.max(slabW, slabH);            // long span (m)
-      if (lx < 0.1) continue;
+      for (const slabId of beam.slabs) {
+        const slab = slabs.find(s => s.id === slabId);
+        if (!slab) continue;
 
-      const beta = ly / lx;
-      if (beta > 2.0) continue; // one-way slab — UDL is already exact for these
+        const slabW = Math.abs(slab.x2 - slab.x1);
+        const slabH = Math.abs(slab.y2 - slab.y1);
+        const lx = Math.min(slabW, slabH); // short span (m)
+        const ly = Math.max(slabW, slabH); // long span (m)
+        if (lx < 0.1) continue;
 
-      // Determine which edge of the slab this beam spans
-      const slabEdge = beam.direction === 'horizontal' ? slabW : slabH;
-      const isLongSide = slabEdge >= ly - 0.01;
+        // Contact ratio: fraction of beam length that overlaps this slab
+        let contactLen: number;
+        if (beam.direction === 'horizontal') {
+          const s = Math.max(beam.x1, Math.min(slab.x1, slab.x2));
+          const e = Math.min(beam.x2, Math.max(slab.x1, slab.x2));
+          contactLen = Math.max(0, e - s);
+        } else {
+          const s = Math.max(beam.y1, Math.min(slab.y1, slab.y2));
+          const e = Math.min(beam.y2, Math.max(slab.y1, slab.y2));
+          contactLen = Math.max(0, e - s);
+        }
+        const contactRatio = beam.length > 1e-6 ? contactLen / beam.length : 0;
+        if (contactRatio < 0.1) continue;
 
-      // Contact ratio: fraction of beam length that overlaps the slab
-      let contactLen: number;
-      if (beam.direction === 'horizontal') {
-        const s = Math.max(beam.x1, Math.min(slab.x1, slab.x2));
-        const e = Math.min(beam.x2, Math.max(slab.x1, slab.x2));
-        contactLen = Math.max(0, e - s);
-      } else {
-        const s = Math.max(beam.y1, Math.min(slab.y1, slab.y2));
-        const e = Math.min(beam.y2, Math.max(slab.y1, slab.y2));
-        contactLen = Math.max(0, e - s);
+        const beta = ly / lx;
+        const slabEdge = beam.direction === 'horizontal' ? slabW : slabH;
+        const isLongSide = slabEdge >= ly - 0.01;
+
+        // Peak intensity (kN/m) = load density × half-short-span
+        const wPeak_DL = wDL_service * (lx / 2);
+        const wPeak_LL = wLL_service * (lx / 2);
+
+        // Normalised shape of this slab's contribution
+        let shape: Array<{ t: number; m: number }>;
+
+        if (beta > 2.0) {
+          // One-way slab: uniform (rectangular) profile on spanning beam only
+          if (!isLongSide) continue; // short-side carries nothing
+          shape = [{ t: 0, m: 1 }, { t: 1, m: 1 }];
+          // (no hasTwoWaySlab = true here — one-way UDL is already captured in
+          //  beam.deadLoad; only flag two-way to trigger profile override)
+        } else {
+          // Two-way slab: trapezoidal (long-side) or triangular (short-side)
+          hasTwoWaySlab = true;
+          if (isLongSide) {
+            const a = Math.min(lx / (2 * ly), 0.499); // normalised ramp fraction
+            shape = [{ t: 0, m: 0 }, { t: a, m: 1 }, { t: 1 - a, m: 1 }, { t: 1, m: 0 }];
+          } else {
+            shape = [{ t: 0, m: 0 }, { t: 0.5, m: 1 }, { t: 1, m: 0 }];
+          }
+        }
+
+        // Accumulate this slab's contribution at each sample point
+        for (let i = 0; i < PROFILE_T.length; i++) {
+          const m = interpShape(PROFILE_T[i], shape);
+          accDL[i] += wPeak_DL * m * contactRatio;
+          accLL[i] += wPeak_LL * m * contactRatio;
+        }
       }
-      const contactRatio = beam.length > 1e-6 ? contactLen / beam.length : 0;
-      if (contactRatio < 0.85) continue; // skip partially overlapping beams
 
-      // Peak load intensity = slab load (kN/m²) × max tributary width = lx/2
-      // This is the actual MAXIMUM ordinate of the non-uniform load diagram.
-      const wPeak_DL = wDL_service * (lx / 2) * contactRatio; // kN/m
-      const wPeak_LL = wLL_service * (lx / 2) * contactRatio; // kN/m
+      // Only override the UDL with a profile if at least one two-way slab is involved.
+      // For all-one-way beams the UDL in beam.deadLoad is already the exact representation.
+      if (!hasTwoWaySlab) continue;
 
-      // Beam self-weight + wall load (always uniform — no profile correction needed)
+      const maxLoad = Math.max(...accDL, ...accLL);
+      if (maxLoad < 1e-6) continue;
+
       const beamSW = (beam.b / 1000) * (beam.h / 1000) * mat.gamma;
       const wallLoad = beam.wallLoad ?? 0;
       const uniformDL_factored = 1.2 * (beamSW + wallLoad);
 
-      // Normalised profile shape (multiplier: 0 → 1 → 1 → 0 or 0 → 1 → 0)
-      let shape: Array<{ t: number; m: number }>;
-      if (isLongSide) {
-        // Trapezoidal: ramp over each end of length (lx/2), plateau in middle
-        const a = Math.min(lx / (2 * ly), 0.499); // normalised ramp fraction
-        shape = [{ t: 0, m: 0 }, { t: a, m: 1 }, { t: 1 - a, m: 1 }, { t: 1, m: 0 }];
-      } else {
-        // Triangular: zero at ends, peak at midspan
-        shape = [{ t: 0, m: 0 }, { t: 0.5, m: 1 }, { t: 1, m: 0 }];
-      }
+      const profileDL = PROFILE_T.map((t, i) => ({ t, wy: accDL[i] }));
+      const profileLL = PROFILE_T.map((t, i) => ({ t, wy: accLL[i] }));
 
-      elemSlabProfiles.set(elem.id, { wPeak_DL_service: wPeak_DL, wPeak_LL_service: wPeak_LL, uniformDL_factored, shape });
+      elemSlabProfiles.set(elem.id, { uniformDL_factored, profileDL, profileLL });
 
-      // IMPORTANT: Override beamDeadLoads / beamLiveLoads so the UDL load case
-      // only carries the UNIFORM portion (SW + wall).  The slab contribution is
-      // now encoded entirely in the profile (elementLoadProfiles in each load case).
-      beamDeadLoads.set(elem.id, uniformDL_factored); // already at 1.2D level
-      beamLiveLoads.set(elem.id, 0);                  // LL moved to profile
+      // Override beamDeadLoads / beamLiveLoads: UDL carries only beam SW + wall.
+      // All slab loads (from ALL adjacent slabs) are now in the profile.
+      beamDeadLoads.set(elem.id, uniformDL_factored);
+      beamLiveLoads.set(elem.id, 0);
     }
   }
 
-  /** Build factored profile points for one element-load-case combination. */
+  /**
+   * Build factored profile points for one element-load-case combination.
+   * DL and LL have INDEPENDENT absolute profiles (key difference from old code:
+   * interior beams may have different DL/LL profile shapes when adjacent slabs
+   * have asymmetric tributary widths).
+   */
   const buildProfile = (
     prof: ElemSlabProfile,
     factorDL: number,
     factorLL: number,
   ): Array<{ t: number; wy: number }> => {
-    const scale = -(factorDL * prof.wPeak_DL_service + factorLL * prof.wPeak_LL_service);
-    return prof.shape.map(pt => ({ t: pt.t, wy: scale * pt.m }));
+    return prof.profileDL.map((ptDL, i) => ({
+      t: ptDL.t,
+      wy: -(factorDL * ptDL.wy + factorLL * prof.profileLL[i].wy),
+    }));
   };
 
   // ── Pattern loading cases — PER FRAME (ACI 318-19 §6.4.3) ───────────────
