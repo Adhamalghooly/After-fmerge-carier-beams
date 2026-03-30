@@ -36,3 +36,9 @@ id = "ZsLEvp61OQslJEqBoMbuM"
 uri = "file://artifacts/structural-design/src/slabFEMEngine/reports/node_topology_report.txt"
 type = "text"
 title = "FEM Node Topology Architecture Fix — Validation Report"
+
+[[outputs]]
+id = "eLB0Lyoljz8iPYsETdYdk"
+uri = "file://BeamOnBeam_BugFix_Report.txt"
+type = "text"
+title = "Beam-on-Beam Bug Fix Report"
