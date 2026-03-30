@@ -394,7 +394,13 @@ export interface BeamOnBeamConnection {
   removedColumnId: string;
   point: { x: number; y: number };
   secondaryBeamIds: string[];
+  /** The beam segment ENDING at the removed-column node (A1) */
   primaryBeamId: string;
+  /**
+   * The beam segment STARTING at the removed-column node (A2), when two
+   * collinear segments meet at the junction. Load must reach BOTH A1 and A2.
+   */
+  continuationBeamId?: string;
   distanceOnPrimary: number;
   primaryDirection: 'horizontal' | 'vertical';
   reactionForce: number;
@@ -574,11 +580,20 @@ export function generateBeams(slabs: Slab[], columns: Column[]): Beam[] {
 }
 
 export function generateFrames(beams: Beam[]): Frame[] {
-  // Group beams by story + direction line to keep stories separate
+  // Tolerance for floating-point coordinate comparisons (same units as coordinates)
+  const COORD_TOL = 1e-4;
+
+  // Normalise a coordinate to a stable string key (rounds to 4 decimal places)
+  const coordKey = (n: number) => Math.round(n * 1e4) / 1e4;
+
+  // Group beams by story + direction line using normalised coordinate keys
   const groups = new Map<string, Beam[]>();
   for (const b of beams) {
     const storyKey = b.storyId ?? '_';
-    const key = b.direction === 'horizontal' ? `${storyKey}-H-${b.y1}` : `${storyKey}-V-${b.x1}`;
+    // Use normalised coordinate so that floating-point near-misses (e.g. 5.000000001)
+    // don't create spurious extra groups splitting A1 and A2 onto different keys.
+    const lineCoord = b.direction === 'horizontal' ? coordKey(b.y1) : coordKey(b.x1);
+    const key = `${storyKey}-${b.direction === 'horizontal' ? 'H' : 'V'}-${lineCoord}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(b);
   }
@@ -603,7 +618,13 @@ export function generateFrames(beams: Beam[]): Frame[] {
     let cur: Beam[] = [sorted[0]];
     for (let i = 1; i < sorted.length; i++) {
       const prev = cur[cur.length - 1];
-      if (prev.x2 === sorted[i].x1 && prev.y2 === sorted[i].y1) {
+      // Use tolerance-based connectivity check instead of strict === to avoid
+      // floating-point mismatches that would split collinear segments (A1, A2)
+      // into separate frames, preventing load transfer at the junction.
+      const connected =
+        Math.abs(prev.x2 - sorted[i].x1) < COORD_TOL &&
+        Math.abs(prev.y2 - sorted[i].y1) < COORD_TOL;
+      if (connected) {
         cur.push(sorted[i]);
       } else {
         frames.push({ id: `F${fid++}`, beamIds: cur.map(b => b.id), direction: cur[0].direction, storyId: cur[0].storyId });
@@ -777,24 +798,32 @@ export function detectBeamOnBeam(
     const primaryBeams = primaryIsHorizontal ? hBeams : vBeams;
     const secondaryBeams = primaryIsHorizontal ? vBeams : hBeams;
 
-    let primaryBeam: Beam | undefined;
+    let primaryBeam: Beam | undefined;    // A1: ends at removed column
+    let continuationBeam: Beam | undefined; // A2: starts at removed column
     let distOnPrimary = 0;
 
     for (const pb of primaryBeams) {
       if (pb.fromCol === colId) {
+        // pb is A2 (starts at removed column)
+        continuationBeam = pb;
         const prevBeam = primaryBeams.find(b => b.toCol === colId);
         if (prevBeam) {
+          // A1 (ends at removed column) found — normal two-segment case
           primaryBeam = prevBeam;
           distOnPrimary = prevBeam.length;
         } else {
+          // Only A2 exists (removed column is the START of the primary beam)
           primaryBeam = pb;
+          continuationBeam = undefined; // no separate A2 when A2 is itself A1
           distOnPrimary = 0;
         }
         break;
       }
       if (pb.toCol === colId) {
+        // A1 found directly — also check for A2 on the other side
         primaryBeam = pb;
         distOnPrimary = pb.length;
+        continuationBeam = primaryBeams.find(b => b.fromCol === colId && b.id !== pb.id);
         break;
       }
     }
@@ -806,6 +835,7 @@ export function detectBeamOnBeam(
       point: { x: col.x, y: col.y },
       secondaryBeamIds: secondaryBeams.map(b => b.id),
       primaryBeamId: primaryBeam.id,
+      continuationBeamId: continuationBeam?.id,
       distanceOnPrimary: distOnPrimary,
       primaryDirection: primaryIsHorizontal ? 'horizontal' : 'vertical',
       reactionForce: 0,
@@ -1035,12 +1065,38 @@ export function analyzeWithBeamOnBeam(
       prevReactions.set(conn.removedColumnId, conn.reactionForce);
     }
 
-    // Step 3: Build point loads from exact reactions
+    // Step 3: Build point loads from exact reactions.
+    // When A1 and A2 are in the SAME frame (the normal case after frame-grouping fixes),
+    // the point load on A1 at a=A1.length correctly transfers as a nodal force to the
+    // shared junction node and A2 sees the effect automatically.
+    // When they are in DIFFERENT frames (edge-case fallback), we also add a zero-position
+    // load to A2's frame so neither segment is missed.
+    const beamFrameMap = new Map<string, string>(); // beamId → frameId
+    for (const f of frames) {
+      for (const bid of f.beamIds) beamFrameMap.set(bid, f.id);
+    }
+
     const pointLoadsMap = new Map<string, MSPointLoad[]>();
     for (const conn of updatedConnections) {
-      const existing = pointLoadsMap.get(conn.primaryBeamId) || [];
-      existing.push({ P: conn.reactionForce, a: conn.distanceOnPrimary });
-      pointLoadsMap.set(conn.primaryBeamId, existing);
+      // Always add load to primary beam (A1) at distanceOnPrimary (= A1.length when
+      // the junction is at the right end of A1, which is the common case)
+      const existingPrimary = pointLoadsMap.get(conn.primaryBeamId) || [];
+      existingPrimary.push({ P: conn.reactionForce, a: conn.distanceOnPrimary });
+      pointLoadsMap.set(conn.primaryBeamId, existingPrimary);
+
+      // If a continuation beam (A2) exists AND is in a different frame from A1,
+      // apply the same concentrated force at position 0 (the junction IS the left
+      // end of A2). This prevents A2's analysis from completely ignoring the load
+      // when frame-splitting occurs.
+      if (conn.continuationBeamId) {
+        const a1Frame = beamFrameMap.get(conn.primaryBeamId);
+        const a2Frame = beamFrameMap.get(conn.continuationBeamId);
+        if (a1Frame !== a2Frame) {
+          const existingCont = pointLoadsMap.get(conn.continuationBeamId) || [];
+          existingCont.push({ P: conn.reactionForce, a: 0 });
+          pointLoadsMap.set(conn.continuationBeamId, existingCont);
+        }
+      }
     }
 
     // Step 4: Re-analyze with point loads and hinges
@@ -1052,22 +1108,39 @@ export function analyzeWithBeamOnBeam(
     });
   }
 
-  // Final pass with converged reactions
-  const pointLoadsMap = new Map<string, MSPointLoad[]>();
-  for (const conn of updatedConnections) {
-    const existing = pointLoadsMap.get(conn.primaryBeamId) || [];
-    existing.push({ P: conn.reactionForce, a: conn.distanceOnPrimary });
-    pointLoadsMap.set(conn.primaryBeamId, existing);
+  // Final pass with converged reactions (same dual-application logic as the iteration)
+  {
+    const beamFrameMap = new Map<string, string>();
+    for (const f of frames) {
+      for (const bid of f.beamIds) beamFrameMap.set(bid, f.id);
+    }
+
+    const pointLoadsMap = new Map<string, MSPointLoad[]>();
+    for (const conn of updatedConnections) {
+      const existingPrimary = pointLoadsMap.get(conn.primaryBeamId) || [];
+      existingPrimary.push({ P: conn.reactionForce, a: conn.distanceOnPrimary });
+      pointLoadsMap.set(conn.primaryBeamId, existingPrimary);
+
+      if (conn.continuationBeamId) {
+        const a1Frame = beamFrameMap.get(conn.primaryBeamId);
+        const a2Frame = beamFrameMap.get(conn.continuationBeamId);
+        if (a1Frame !== a2Frame) {
+          const existingCont = pointLoadsMap.get(conn.continuationBeamId) || [];
+          existingCont.push({ P: conn.reactionForce, a: 0 });
+          pointLoadsMap.set(conn.continuationBeamId, existingCont);
+        }
+      }
+    }
+
+    const finalResults: FrameResult[] = frames.map(f => {
+      const hasPointLoads = f.beamIds.some(id => pointLoadsMap.has(id));
+      return hasPointLoads
+        ? analyzeFrame(f, beamsMap, columns, mat, removedColumnIds, pointLoadsMap, secondaryBeamHinges)
+        : currentResults[frames.indexOf(f)];
+    });
+
+    return { frameResults: finalResults, connections: updatedConnections, iterations: iteration, converged };
   }
-
-  const finalResults: FrameResult[] = frames.map(f => {
-    const hasPointLoads = f.beamIds.some(id => pointLoadsMap.has(id));
-    return hasPointLoads
-      ? analyzeFrame(f, beamsMap, columns, mat, removedColumnIds, pointLoadsMap, secondaryBeamHinges)
-      : currentResults[frames.indexOf(f)];
-  });
-
-  return { frameResults: finalResults, connections: updatedConnections, iterations: iteration, converged };
 }
 
 // ===================== DEFLECTION CALCULATION =====================
