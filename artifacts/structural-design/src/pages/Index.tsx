@@ -106,7 +106,7 @@ const Index = () => {
     selectedNodeId, selectedFrameId, selectedAreaId,
     removedColumnIds, removedBeamIds, beamOverrides, colOverrides, slabPropsOverrides, extraBeams, extraColumns, supportRestraints, frameEndReleases,
     modalOpen, selectedElement, elemPropsOpen, elemPropsFrameId, elemPropsAreaId,
-    diagramOpen, diagramData, savedMessage,
+    diagramOpen, diagramData, savedMessage, bobManualPrimary,
   } = state;
 
   // Main bottom navigation tab
@@ -359,8 +359,8 @@ const Index = () => {
 
   const detectedConnections = useMemo(() => {
     if (removedColumnIds.length === 0) return [];
-    return detectBeamOnBeam(beamsWithLoads, columns, removedColumnIds);
-  }, [beamsWithLoads, columns, removedColumnIds]);
+    return detectBeamOnBeam(beamsWithLoads, columns, removedColumnIds, bobManualPrimary);
+  }, [beamsWithLoads, columns, removedColumnIds, bobManualPrimary]);
 
   const runAnalysis = () => {
     setFemError(null);
@@ -1863,92 +1863,195 @@ const Index = () => {
                     const analyzedConn = bobConnections.find(c => c.removedColumnId === conn.removedColumnId);
                     const primaryBeam = beamsWithLoads.find(b => b.id === conn.primaryBeamId);
                     const contBeam = conn.continuationBeamId ? beamsWithLoads.find(b => b.id === conn.continuationBeamId) : undefined;
+                    const isManualOverride = bobManualPrimary[conn.removedColumnId] !== undefined;
+
+                    // Determine criterion label
                     const criterion = (() => {
-                      const hBeams = beamsWithLoads.filter(b =>
+                      if (isManualOverride) return 'تعيين يدوي ✎';
+                      const hB = beamsWithLoads.filter(b =>
                         (b.fromCol === conn.removedColumnId || b.toCol === conn.removedColumnId) && b.direction === 'horizontal'
                       );
-                      const vBeams = beamsWithLoads.filter(b =>
+                      const vB = beamsWithLoads.filter(b =>
                         (b.fromCol === conn.removedColumnId || b.toCol === conn.removedColumnId) && b.direction === 'vertical'
                       );
-                      if (conn.primaryDirection === 'horizontal' && hBeams.length >= 2 && vBeams.length === 1) return 'استمرارية (2 أفقي + 1 رأسي)';
-                      if (conn.primaryDirection === 'vertical' && vBeams.length >= 2 && hBeams.length === 1) return 'استمرارية (2 رأسي + 1 أفقي)';
+                      if (conn.primaryDirection === 'horizontal' && hB.length >= 2 && vB.length === 1) return 'استمرارية (2 أفقي + 1 رأسي)';
+                      if (conn.primaryDirection === 'vertical' && vB.length >= 2 && hB.length === 1) return 'استمرارية (2 رأسي + 1 أفقي)';
                       return 'صلابة EI/L';
                     })();
+
+                    // Collect beams at this column for SVG
+                    const hBeamsAtCol = beamsWithLoads.filter(b =>
+                      (b.fromCol === conn.removedColumnId || b.toCol === conn.removedColumnId) && b.direction === 'horizontal'
+                    );
+                    const vBeamsAtCol = beamsWithLoads.filter(b =>
+                      (b.fromCol === conn.removedColumnId || b.toCol === conn.removedColumnId) && b.direction === 'vertical'
+                    );
+                    const primaryIsH = conn.primaryDirection === 'horizontal';
+
                     return (
-                      <div key={i} className="rounded-lg border border-indigo-200/60 dark:border-indigo-800/60 bg-background p-3 space-y-2">
-                        {/* Header row */}
-                        <div className="flex items-center justify-between flex-wrap gap-2">
-                          <span className="text-[10px] text-muted-foreground">
-                            عمود محذوف: <span className="font-mono font-bold text-foreground">{conn.removedColumnId}</span>
-                            <span className="mx-1 opacity-40">·</span>
-                            نقطة ({conn.point.x.toFixed(1)}، {conn.point.y.toFixed(1)}) م
-                            <span className="mx-1 opacity-40">·</span>
-                            معيار التحديد: <span className="font-semibold">{criterion}</span>
-                          </span>
-                          {analyzedConn && analyzedConn.reactionForce > 0 && (
-                            <span className="text-[10px] font-bold bg-amber-500/15 border border-amber-400/40 text-amber-700 dark:text-amber-400 rounded px-2 py-0.5">
-                              حِمل منقول: {analyzedConn.reactionForce.toFixed(1)} kN
-                            </span>
-                          )}
-                        </div>
-                        {/* Primary beam */}
-                        <div className="flex items-start gap-2">
-                          <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-green-500/15 border border-green-400/40 text-green-700 dark:text-green-400 px-1 py-0.5">
-                            حامل ✓
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <span className="font-mono text-xs font-bold text-foreground">{conn.primaryBeamId}</span>
-                            {primaryBeam && (
-                              <span className="text-[10px] text-muted-foreground mr-2">
-                                {conn.primaryDirection === 'horizontal' ? 'أفقي' : 'رأسي'} —
-                                بحر {(primaryBeam.length / 1000).toFixed(2)} م —
-                                {primaryBeam.b}×{primaryBeam.h} مم
-                              </span>
-                            )}
-                            {analyzedConn && analyzedConn.reactionForce > 0 && (
-                              <span className="text-[10px] text-muted-foreground mr-2">
-                                @ {(conn.distanceOnPrimary / 1000).toFixed(2)} م من الطرف الأيسر
-                              </span>
-                            )}
+                      <div key={i} className="rounded-lg border border-indigo-200/60 dark:border-indigo-800/60 bg-background p-3 space-y-3">
+
+                        {/* ── SVG diagram + text info side-by-side ── */}
+                        <div className="flex gap-3 items-start flex-wrap">
+
+                          {/* SVG cross diagram */}
+                          <div className="shrink-0">
+                            <svg width="110" height="110" viewBox="0 0 110 110" className="rounded border border-border bg-muted/30">
+                              {/* Horizontal beam arm(s) */}
+                              {hBeamsAtCol.map((hb, hi) => {
+                                const isCarrier = primaryIsH;
+                                const color = isCarrier ? '#22c55e' : '#ef4444';
+                                const strokeW = isCarrier ? 5 : 3;
+                                // slight vertical offset for multiple beams
+                                const yOff = (hi - (hBeamsAtCol.length - 1) / 2) * 6;
+                                return (
+                                  <g key={hb.id}>
+                                    <line x1={5} y1={55 + yOff} x2={105} y2={55 + yOff} stroke={color} strokeWidth={strokeW} strokeLinecap="round" />
+                                    <text x={8} y={55 + yOff - 3} fontSize={7} fill={color} fontWeight="bold">{hb.id}</text>
+                                  </g>
+                                );
+                              })}
+                              {/* Vertical beam arm(s) */}
+                              {vBeamsAtCol.map((vb, vi) => {
+                                const isCarrier = !primaryIsH;
+                                const color = isCarrier ? '#22c55e' : '#ef4444';
+                                const strokeW = isCarrier ? 5 : 3;
+                                const xOff = (vi - (vBeamsAtCol.length - 1) / 2) * 6;
+                                return (
+                                  <g key={vb.id}>
+                                    <line x1={55 + xOff} y1={5} x2={55 + xOff} y2={105} stroke={color} strokeWidth={strokeW} strokeLinecap="round" />
+                                    <text x={55 + xOff + 3} y={14} fontSize={7} fill={color} fontWeight="bold">{vb.id}</text>
+                                  </g>
+                                );
+                              })}
+                              {/* Removed column dot at intersection */}
+                              <circle cx={55} cy={55} r={6} fill="#6366f1" stroke="white" strokeWidth={1.5} />
+                              <text x={55} y={55 + 3.5} textAnchor="middle" fontSize={6} fill="white" fontWeight="bold">✕</text>
+                              {/* Legend labels */}
+                              <text x={55} y={106} textAnchor="middle" fontSize={6} fill="#6366f1">{conn.removedColumnId}</text>
+                              {/* Carrier/carried corner labels */}
+                              <text x={4} y={108} fontSize={6} fill="#22c55e">حامل</text>
+                              <text x={75} y={108} fontSize={6} fill="#ef4444">محمول</text>
+                            </svg>
                           </div>
-                        </div>
-                        {/* Continuation beam (A2) if any */}
-                        {contBeam && (
-                          <div className="flex items-start gap-2">
-                            <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-green-500/10 border border-green-400/30 text-green-600 dark:text-green-500 px-1 py-0.5">
-                              حامل A2
-                            </span>
-                            <div className="flex-1 min-w-0">
-                              <span className="font-mono text-xs font-bold text-foreground">{conn.continuationBeamId}</span>
-                              <span className="text-[10px] text-muted-foreground mr-2">
-                                استمرار للجسر الحامل — بحر {(contBeam.length / 1000).toFixed(2)} م — {contBeam.b}×{contBeam.h} مم
+
+                          {/* Text details */}
+                          <div className="flex-1 min-w-0 space-y-2">
+                            {/* Header */}
+                            <div className="flex items-center justify-between flex-wrap gap-1">
+                              <span className="text-[10px] text-muted-foreground leading-relaxed">
+                                عمود محذوف: <span className="font-mono font-bold text-foreground">{conn.removedColumnId}</span>
+                                <span className="mx-1 opacity-40">·</span>
+                                ({conn.point.x.toFixed(1)}، {conn.point.y.toFixed(1)}) م
+                                <br />
+                                معيار: <span className={`font-semibold ${isManualOverride ? 'text-violet-600 dark:text-violet-400' : ''}`}>{criterion}</span>
                               </span>
+                              {analyzedConn && analyzedConn.reactionForce > 0 && (
+                                <span className="text-[10px] font-bold bg-amber-500/15 border border-amber-400/40 text-amber-700 dark:text-amber-400 rounded px-2 py-0.5">
+                                  حِمل منقول: {analyzedConn.reactionForce.toFixed(1)} kN
+                                </span>
+                              )}
                             </div>
-                          </div>
-                        )}
-                        {/* Secondary beams */}
-                        {conn.secondaryBeamIds.map(sid => {
-                          const sb = beamsWithLoads.find(b => b.id === sid);
-                          const isHingedAtI = sb?.fromCol === conn.removedColumnId;
-                          return (
-                            <div key={sid} className="flex items-start gap-2">
-                              <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-red-500/15 border border-red-400/40 text-red-700 dark:text-red-400 px-1 py-0.5">
-                                محمول ⭕
+
+                            {/* Manual override flip button */}
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] text-muted-foreground">الجسر الحامل:</span>
+                              <button
+                                onClick={() => {
+                                  const currentForced = bobManualPrimary[conn.removedColumnId];
+                                  if (currentForced === undefined) {
+                                    // First flip: override to opposite of auto
+                                    dispatch({ type: 'SET_BOB_MANUAL_PRIMARY', colId: conn.removedColumnId, direction: primaryIsH ? 'vertical' : 'horizontal' });
+                                  } else if (currentForced !== conn.primaryDirection as 'horizontal' | 'vertical') {
+                                    // Second flip: back to auto (remove override)
+                                    dispatch({ type: 'SET_BOB_MANUAL_PRIMARY', colId: conn.removedColumnId, direction: null });
+                                  } else {
+                                    // Flip to opposite
+                                    dispatch({ type: 'SET_BOB_MANUAL_PRIMARY', colId: conn.removedColumnId, direction: currentForced === 'horizontal' ? 'vertical' : 'horizontal' });
+                                  }
+                                }}
+                                className={`inline-flex items-center gap-1 text-[10px] font-bold rounded border px-2 py-0.5 transition-colors cursor-pointer
+                                  ${isManualOverride
+                                    ? 'bg-violet-500/15 border-violet-400/50 text-violet-700 dark:text-violet-400 hover:bg-violet-500/25'
+                                    : 'bg-muted border-border text-muted-foreground hover:bg-accent hover:text-foreground'
+                                  }`}
+                                title="اضغط لتبديل الجسر الحامل / المحمول يدوياً"
+                              >
+                                <span>{primaryIsH ? 'أفقي ↔' : 'رأسي ↕'}</span>
+                                {isManualOverride ? <span>· يدوي ✎</span> : <span>· تلقائي</span>}
+                              </button>
+                              {isManualOverride && (
+                                <button
+                                  onClick={() => dispatch({ type: 'SET_BOB_MANUAL_PRIMARY', colId: conn.removedColumnId, direction: null })}
+                                  className="text-[9px] text-muted-foreground hover:text-foreground underline cursor-pointer"
+                                >
+                                  إعادة تعيين تلقائي
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Primary beam row */}
+                            <div className="flex items-start gap-2">
+                              <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-green-500/15 border border-green-400/40 text-green-700 dark:text-green-400 px-1 py-0.5">
+                                حامل ✓
                               </span>
                               <div className="flex-1 min-w-0">
-                                <span className="font-mono text-xs font-bold text-foreground">{sid}</span>
-                                {sb && (
+                                <span className="font-mono text-xs font-bold text-foreground">{conn.primaryBeamId}</span>
+                                {primaryBeam && (
                                   <span className="text-[10px] text-muted-foreground mr-2">
-                                    {sb.direction === 'horizontal' ? 'أفقي' : 'رأسي'} —
-                                    بحر {(sb.length / 1000).toFixed(2)} م —
-                                    {sb.b}×{sb.h} مم —
-                                    مفصلة عند {isHingedAtI ? 'البداية (I)' : 'النهاية (J)'}
+                                    {conn.primaryDirection === 'horizontal' ? 'أفقي' : 'رأسي'} —
+                                    بحر {(primaryBeam.length / 1000).toFixed(2)} م —
+                                    {primaryBeam.b}×{primaryBeam.h} مم
+                                  </span>
+                                )}
+                                {analyzedConn && analyzedConn.reactionForce > 0 && (
+                                  <span className="text-[10px] text-muted-foreground mr-2">
+                                    @ {(conn.distanceOnPrimary / 1000).toFixed(2)} م من الطرف
                                   </span>
                                 )}
                               </div>
                             </div>
-                          );
-                        })}
+
+                            {/* Continuation beam */}
+                            {contBeam && (
+                              <div className="flex items-start gap-2">
+                                <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-green-500/10 border border-green-400/30 text-green-600 dark:text-green-500 px-1 py-0.5">
+                                  حامل A2
+                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="font-mono text-xs font-bold text-foreground">{conn.continuationBeamId}</span>
+                                  <span className="text-[10px] text-muted-foreground mr-2">
+                                    استمرار — {(contBeam.length / 1000).toFixed(2)} م — {contBeam.b}×{contBeam.h} مم
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Secondary beams */}
+                            {conn.secondaryBeamIds.map(sid => {
+                              const sb = beamsWithLoads.find(b => b.id === sid);
+                              const isHingedAtI = sb?.fromCol === conn.removedColumnId;
+                              return (
+                                <div key={sid} className="flex items-start gap-2">
+                                  <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-red-500/15 border border-red-400/40 text-red-700 dark:text-red-400 px-1 py-0.5">
+                                    محمول ⭕
+                                  </span>
+                                  <div className="flex-1 min-w-0">
+                                    <span className="font-mono text-xs font-bold text-foreground">{sid}</span>
+                                    {sb && (
+                                      <span className="text-[10px] text-muted-foreground mr-2">
+                                        {sb.direction === 'horizontal' ? 'أفقي' : 'رأسي'} —
+                                        {(sb.length / 1000).toFixed(2)} م —
+                                        {sb.b}×{sb.h} مم —
+                                        مفصلة عند {isHingedAtI ? 'البداية (I)' : 'النهاية (J)'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
                     );
                   })}

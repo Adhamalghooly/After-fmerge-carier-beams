@@ -761,7 +761,9 @@ export function calculateBeamLoads(
 
 // ===================== BEAM-ON-BEAM DETECTION =====================
 export function detectBeamOnBeam(
-  beams: Beam[], columns: Column[], removedColumnIds: string[]
+  beams: Beam[], columns: Column[], removedColumnIds: string[],
+  /** تعديل يدوي على اتجاه الجسر الحامل: المفتاح = removedColumnId، القيمة = الاتجاه المفروض */
+  forcedPrimaryDirection?: Record<string, 'horizontal' | 'vertical'>
 ): BeamOnBeamConnection[] {
   const connections: BeamOnBeamConnection[] = [];
 
@@ -779,8 +781,12 @@ export function detectBeamOnBeam(
     // The collinear pair is ALWAYS primary (they form one continuous beam split for analysis)
     // The single perpendicular beam is ALWAYS secondary (carried/محمول)
     // This overrides the stiffness comparison because continuity governs.
+    // Exception: user manual override always wins.
     let primaryIsHorizontal: boolean;
-    if (hBeams.length >= 2 && vBeams.length === 1) {
+    if (forcedPrimaryDirection?.[colId] !== undefined) {
+      // User override takes priority over all automatic rules
+      primaryIsHorizontal = forcedPrimaryDirection[colId] === 'horizontal';
+    } else if (hBeams.length >= 2 && vBeams.length === 1) {
       // Two horizontal (collinear) + one vertical: horizontal is primary
       primaryIsHorizontal = true;
     } else if (vBeams.length >= 2 && hBeams.length === 1) {

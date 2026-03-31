@@ -65,6 +65,11 @@ export interface AppState {
    * والإطارات (جسور + أعمدة) تحمل كل الجساءة الإنشائية — مطابق لـ ETABS "No Slab Stiffness".
    */
   ignoreSlab: boolean;
+  /**
+   * تعديل يدوي على تصنيف الجسر الحامل/المحمول لكل عمود محذوف.
+   * المفتاح: removedColumnId، القيمة: اتجاه الجسر الحامل المفروض ('horizontal' | 'vertical').
+   */
+  bobManualPrimary: Record<string, 'horizontal' | 'vertical'>;
 }
 
 export type AppAction =
@@ -132,7 +137,8 @@ export type AppAction =
   | { type: 'LOAD_PROJECT'; data: Partial<AppState> }
   | { type: 'RESET_TO_DEFAULT' }
   | { type: 'SET_ENGINE'; engine: EngineType }
-  | { type: 'SET_IGNORE_SLAB'; value: boolean };
+  | { type: 'SET_IGNORE_SLAB'; value: boolean }
+  | { type: 'SET_BOB_MANUAL_PRIMARY'; colId: string; direction: 'horizontal' | 'vertical' | null };
 
 const defaultStoryId = 'ST1';
 
@@ -205,6 +211,7 @@ export const initialState: AppState = {
   frameEndReleases: {},
   selectedEngine: 'legacy_3d',
   ignoreSlab: false,
+  bobManualPrimary: {},
 };
 
 // Actions that should NOT be tracked in undo (UI-only actions)
@@ -266,6 +273,15 @@ function coreReducer(state: AppState, action: AppAction): AppState {
       return { ...state, selectedEngine: action.engine, analyzed: false };
     case 'SET_IGNORE_SLAB':
       return { ...state, ignoreSlab: action.value, analyzed: false };
+    case 'SET_BOB_MANUAL_PRIMARY': {
+      const updated = { ...state.bobManualPrimary };
+      if (action.direction === null) {
+        delete updated[action.colId];
+      } else {
+        updated[action.colId] = action.direction;
+      }
+      return { ...state, bobManualPrimary: updated, analyzed: false };
+    }
     case 'SET_ACTIVE_TAB':
       return { ...state, activeTab: action.tab };
     case 'SET_MODE':
