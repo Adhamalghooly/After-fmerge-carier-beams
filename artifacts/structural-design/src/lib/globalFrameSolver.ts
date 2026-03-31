@@ -756,7 +756,8 @@ export function solveGlobalFrame(
       const gDof = i * 6 + k;
       let sum = 0;
       for (let j = 0; j < nDOF; j++) sum += K[gDof * nDOF + j] * d[j];
-      reaction[k] = sum + F[gDof];
+      // Standard FEM reaction: K·d = F_applied + R  →  R = K·d − F_applied
+      reaction[k] = sum - F[gDof];
     }
     reactions.set(nodes[i].id, [
       reaction[0] / 1000, reaction[1] / 1000, reaction[2] / 1000,
@@ -1298,7 +1299,8 @@ export function runTest2_BeamOnBeam(): GFSValidationTest {
   const rN3 = result.reactions.get(N3.id);
   const rN4 = result.reactions.get(N4.id);
 
-  const totalApplied = w / 1000 * (Ls / 1000); // kN (total UDL)
+  // w in N/mm (= kN/m), Ls in mm  →  total force = w × Ls N  →  ÷ 1000 = kN
+  const totalApplied = w * Ls / 1000; // kN
   const reactionSum  = (rN1 ? Math.abs(rN1[2]) : 0) + (rN3 ? Math.abs(rN3[2]) : 0) + (rN4 ? Math.abs(rN4[2]) : 0);
   const equilibriumOk = Math.abs(reactionSum - totalApplied) / totalApplied < 0.02;
 
@@ -1311,8 +1313,8 @@ export function runTest2_BeamOnBeam(): GFSValidationTest {
     passed,
     details: [
       `Primary beam: Lp = ${Lp/1000} m  |  Secondary beam: Ls = ${Ls/1000} m`,
-      `UDL on secondary beam: w = ${w} kN/m`,
-      `Total applied load: ${totalApplied.toFixed(2)} kN`,
+      `UDL on secondary beam: w = ${w} N/mm (= ${w} kN/m)`,
+      `Total applied load: w × Ls = ${w} × ${Ls} / 1000 = ${totalApplied.toFixed(2)} kN`,
       `Shared node N2 DOF start: ${N2.dofStart} (same for PA, PB, S1)`,
       `Reaction at N1 (primary left):  ${rN1 ? rN1[2].toFixed(2) : 'N/A'} kN`,
       `Reaction at N3 (primary right): ${rN3 ? rN3[2].toFixed(2) : 'N/A'} kN`,
@@ -1811,8 +1813,9 @@ export function generateFullSolverReport(input: FullSolverReportInput): string {
       const e = elements.find(el => el.id === eid);
       if (!e) continue;
       const nI = nodes.find(n => n.id === e.nodeI)!, nJ = nodes.find(n => n.id === e.nodeJ)!;
-      const L = Math.sqrt((nJ.x-nI.x)**2 + (nJ.y-nI.y)**2 + (nJ.z-nI.z)**2) / 1000;
-      totalAppliedFz += w.wz / 1000 * L;
+      // w.wz is in N/mm (= kN/m); L in mm → force in N → /1000 = kN
+      const L_mm = Math.sqrt((nJ.x-nI.x)**2 + (nJ.y-nI.y)**2 + (nJ.z-nI.z)**2);
+      totalAppliedFz += w.wz * L_mm / 1000;
     }
   }
   if (load.nodalLoads) {

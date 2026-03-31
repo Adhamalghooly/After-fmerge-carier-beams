@@ -1,0 +1,380 @@
+
+════════════════════════════════════════════════════════════════════════
+  GLOBAL FRAME SOLVER — FULL ANALYSIS REPORT
+════════════════════════════════════════════════════════════════════════
+  Generated                    2026-03-31T13:29:45.869Z
+  Solver version               1.0.0
+  Report purpose               Full export for debugging and validation
+
+  HOW TO USE THIS REPORT:
+  • Section 5  — Check validation pass/fail and expected vs actual values
+  • Section 6  — Check element forces for sign errors or magnitude issues
+  • Section 7  — Check global equilibrium (ΣFz must equal total applied load)
+  • Section 10 — Check DOF consistency and moment equilibrium at shared nodes
+  • Section 11 — All errors and warnings in one place
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 1 — SYSTEM SUMMARY
+════════════════════════════════════════════════════════════════════════
+  Total nodes                  5
+  Total elements               4
+  Total DOF                    30
+  Free DOF                     6
+  Fixed DOF                    24
+  Reduced matrix               6 × 6
+  Solve time                   1.000 ms
+  Beam groups                  0
+  Validation tests             2 / 4 passed
+  Diagnostic status            PASSED
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 2 — NODE REGISTRY
+════════════════════════════════════════════════════════════════════════
+
+  ── Each node shows: ID, coordinates (mm), DOF start, restraints, connected elements
+  ────────────────────────────────────────────────────────────────────────
+
+  ID          X(mm)      Y(mm)      Z(mm)    dofStart  DOFs                  Restraints[Ux,Uy,Uz,Rx,Ry,Rz]     Connected
+  ────────────────────────────────────────────────────────────────────────
+  N1              0          0          0           0  [0,1,2,3,4,5]         [1,1,1,1,1,1]                     A1
+  N2           4000          0          0           6  [6,7,8,9,10,11]       [0,0,0,0,0,0]                     A1,A2,B1,C1
+  N3           8000          0          0          12  [12,13,14,15,16,17]   [1,1,1,1,1,1]                     A2
+  N4           4000       6000          0          18  [18,19,20,21,22,23]   [1,1,1,1,1,1]                     B1
+  N5           4000      -4000          0          24  [24,25,26,27,28,29]   [1,1,1,1,1,1]                     C1
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 3 — ELEMENT REGISTRY
+════════════════════════════════════════════════════════════════════════
+
+  ID        Type      NodeI    NodeJ      b(mm)    h(mm)      A(mm²)         Iy(mm⁴)         Iz(mm⁴)          J(mm⁴)    E(MPa)    G(MPa)    Modifier  Releases
+  ────────────────────────────────────────────────────────────────────────
+  A1        beam      N1       N2           300      600      180000        5.400e+9        1.350e+9        1.854e+9     25000     10000        0.35  none
+  A2        beam      N2       N3           300      600      180000        5.400e+9        1.350e+9        1.854e+9     25000     10000        0.35  none
+  B1        beam      N2       N4           250      500      125000        2.604e+9        6.510e+8        8.941e+8     25000     10000        0.35  none
+  C1        beam      N5       N2           250      500      125000        2.604e+9        6.510e+8        8.941e+8     25000     10000        0.35  none
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 4 — LOAD SUMMARY
+════════════════════════════════════════════════════════════════════════
+
+  ── Element distributed loads (global coords, kN/m)
+  ────────────────────────────────────────────────────────────────────────
+
+  ElemID        wx(kN/m)    wy(kN/m)    wz(kN/m)  NOTE
+  ········································································
+  A1               0.000       0.000     -25.000    ← gravity (downward)
+  A2               0.000       0.000     -25.000    ← gravity (downward)
+  B1               0.000       0.000     -30.000    ← gravity (downward)
+  C1               0.000       0.000     -20.000    ← gravity (downward)
+
+    Total gravity load (ΣwzL)  460.000 kN
+
+  ── Nodal loads (kN, kN·m)
+  ────────────────────────────────────────────────────────────────────────
+
+  (no nodal loads)
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 5 — VALIDATION TEST RESULTS
+════════════════════════════════════════════════════════════════════════
+
+  Overall: ✗ 2 FAILED
+
+
+  ── Test 1: Test 1 — Fixed-Fixed Beam UDL  [PASS]
+  ────────────────────────────────────────────────────────────────────────
+  Description: Single span fixed-fixed beam under UDL. Verifies classical moment solution.
+
+  Details:
+    Span L = 6 m, w = 20 kN/m
+    Nodes: 2, DOFs: 12, Free: 0
+    Expected M_support = wL²/12 = 60.00 kN·m
+    Expected M_midspan = wL²/24 = 30.00 kN·m
+    Computed M_support = 60.00 kN·m
+    Computed M_midspan = 30.00 kN·m
+    ✓ Classical solution matched within 2%
+
+  Expected values:
+    M_support                      = 60.000000
+    M_midspan                      = 30.000000
+  Actual values:
+    M_support                      = 60.000000  (error = 0.00%)
+    M_midspan                      = 30.000000  (error = 0.00%)
+
+  ── Test 2: Test 2 — Secondary Beam-on-Primary Beam  [FAIL]
+  ────────────────────────────────────────────────────────────────────────
+  Description: UDL on secondary beam flows into primary beam via shared node — no explicit load transfer code.
+
+  Details:
+    Primary beam: Lp = 8 m  |  Secondary beam: Ls = 4 m
+    UDL on secondary beam: w = 30 kN/m
+    Total applied load: 0.12 kN
+    Shared node N2 DOF start: 6 (same for PA, PB, S1)
+    Reaction at N1 (primary left):  -20.00 kN
+    Reaction at N3 (primary right): -20.00 kN
+    Reaction at N4 (secondary end): 40.00 kN
+    Sum of reactions: 80.00 kN  (expected 0.12 kN)
+    ❌ Equilibrium error > 2%
+    ✓ Load reached primary beam at both supports
+
+  Expected values:
+    totalReaction                  = 0.120000
+    N1_reaction_nonzero            = 1.000000
+    N3_reaction_nonzero            = 1.000000
+  Actual values:
+    totalReaction                  = 80.000000  (error = 66566.67%)
+    N1_Fz                          = -20.000000
+    N3_Fz                          = -20.000000
+    N4_Fz                          = 40.000000
+
+  *** FAILURE DIAGNOSIS ***
+  Possible causes:
+    1. Shared node DOFs are not truly identical (check Section 10 DOF consistency)
+    2. Fixed-end force transformation error (check transformation matrix T)
+    3. Boundary condition not applied correctly (check Section 2 restraints)
+    4. Static condensation error for releases (check release DOF indices)
+
+  ── Test 3: Test 3 — Multi-Level Beam Chain (C → B → A)  [PASS]
+  ────────────────────────────────────────────────────────────────────────
+  Description: Three-level beam interaction. Load at C propagates to B then A — all in ONE solve, no iteration.
+
+  Details:
+    Three beams: A1, A2 (primary), B1 (secondary), C1 (tertiary)
+    Nodes: 5, DOF: 30, Free: 6
+    Applied point load at N7: 100 kN
+    Sum of all vertical reactions: 100.00 kN (expected 100 kN)
+    ✓ Global equilibrium — load propagated through multi-level chain automatically
+    ✓ No explicit load transfer code — behaviour from shared DOFs and single matrix solve
+
+  Expected values:
+    totalReaction                  = 100.000000
+  Actual values:
+    totalReaction                  = 100.000000  (error = 0.00%)
+
+  ── Test 4: Test 4 — Symmetric Model  [FAIL]
+  ────────────────────────────────────────────────────────────────────────
+  Description: Two equal beams with equal loads → symmetric moments and reactions.
+
+  Details:
+    Span: 2 × 5 m, UDL: 25 kN/m each side
+    Reaction at NL: 0.00 kN
+    Reaction at NR: 0.00 kN
+    Moment at left support (BL_I): 208.33 kN·m
+    Moment at right support (BR_J): 208.33 kN·m
+    Centre node displacement Uz: 114.2857 mm
+    ✓ Moments symmetric (< 1% asymmetry)
+    ❌ Reaction asymmetry > 1%
+
+  Expected values:
+    ML_equals_MR                   = 1.000000
+    reactionLeft_equals_reactionRight = 1.000000
+  Actual values:
+    ML                             = 208.333333
+    MR                             = 208.333333
+    R_left                         = 0.000000
+    R_right                        = 0.000000
+
+  *** FAILURE DIAGNOSIS ***
+  Possible causes:
+    1. Shared node DOFs are not truly identical (check Section 10 DOF consistency)
+    2. Fixed-end force transformation error (check transformation matrix T)
+    3. Boundary condition not applied correctly (check Section 2 restraints)
+    4. Static condensation error for releases (check release DOF indices)
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 6 — ELEMENT FORCE RESULTS
+════════════════════════════════════════════════════════════════════════
+
+  ── Forces in LOCAL element coordinates — [Fx,Fy,Fz,Mx,My,Mz] at node I and J
+  ────────────────────────────────────────────────────────────────────────
+
+  Units: forces in kN, moments in kN·m
+  Sign convention: Fx+ = tension, Mz+ = sagging (ETABS)
+
+  Element: A1  |  L = 4.000 m
+    Node I (N1):  Fx=0.0000  Fy=-140.3061  Fz=0.0000  Mx=-27.5962  My=0.0000  Mz=-213.9454
+    Node J (N2):  Fx=0.0000  Fy=40.3061  Fz=0.0000  Mx=27.5962  My=0.0000  Mz=-147.2788
+    Derived:  Axial=0.0000 kN  ShearY=140.3061 kN  ShearZ=0.0000 kN
+              MzI=213.9454 kN·m  MzJ=-147.2788 kN·m  Mz_mid=147.2788 kN·m
+              MyI=0.0000 kN·m  MyJ=0.0000 kN·m  Torsion=27.5962 kN·m
+    Self-equilibrium (ΣVy = w·L): VyI+VyJ = -100.0000  w·L = -0.1000  ⚠ CHECK
+
+  Element: A2  |  L = 4.000 m
+    Node I (N2):  Fx=0.0000  Fy=40.3061  Fz=0.0000  Mx=27.5962  My=0.0000  Mz=147.2788
+    Node J (N3):  Fx=0.0000  Fy=-140.3061  Fz=0.0000  Mx=-27.5962  My=0.0000  Mz=213.9454
+    Derived:  Axial=0.0000 kN  ShearY=140.3061 kN  ShearZ=0.0000 kN
+              MzI=-147.2788 kN·m  MzJ=213.9454 kN·m  Mz_mid=147.2788 kN·m
+              MyI=0.0000 kN·m  MyJ=0.0000 kN·m  Torsion=27.5962 kN·m
+    Self-equilibrium (ΣVy = w·L): VyI+VyJ = -100.0000  w·L = -0.1000  ⚠ CHECK
+
+  Element: B1  |  L = 6.000 m
+    Node I (N2):  Fx=0.0000  Fy=-71.4432  Fz=0.0000  Mx=0.0000  My=0.0000  Mz=-28.6764
+    Node J (N4):  Fx=0.0000  Fy=-108.5568  Fz=0.0000  Mx=0.0000  My=0.0000  Mz=140.0175
+    Derived:  Axial=0.0000 kN  ShearY=108.5568 kN  ShearZ=0.0000 kN
+              MzI=28.6764 kN·m  MzJ=140.0175 kN·m  Mz_mid=56.3871 kN·m
+              MyI=0.0000 kN·m  MyJ=0.0000 kN·m  Torsion=0.0000 kN·m
+    Self-equilibrium (ΣVy = w·L): VyI+VyJ = -180.0000  w·L = -0.1800  ⚠ CHECK
+
+  Element: C1  |  L = 4.000 m
+    Node I (N5):  Fx=0.0000  Fy=-70.8311  Fz=0.0000  Mx=0.0000  My=0.0000  Mz=-96.8083
+    Node J (N2):  Fx=0.0000  Fy=-9.1689  Fz=0.0000  Mx=0.0000  My=0.0000  Mz=-26.5159
+    Derived:  Axial=0.0000 kN  ShearY=70.8311 kN  ShearZ=0.0000 kN
+              MzI=96.8083 kN·m  MzJ=-26.5159 kN·m  Mz_mid=28.5835 kN·m
+              MyI=0.0000 kN·m  MyJ=0.0000 kN·m  Torsion=0.0000 kN·m
+    Self-equilibrium (ΣVy = w·L): VyI+VyJ = -80.0000  w·L = -0.0800  ⚠ CHECK
+
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 7 — SUPPORT REACTIONS & GLOBAL EQUILIBRIUM
+════════════════════════════════════════════════════════════════════════
+
+  NodeID        Fx(kN)      Fy(kN)      Fz(kN)    Mx(kN·m)    My(kN·m)    Mz(kN·m)
+  ────────────────────────────────────────────────────────────────────────
+  N1            0.0000      0.0000    -40.3061    -27.5962    147.2788      0.0000
+  N3            0.0000      0.0000    -40.3061    -27.5962   -147.2788      0.0000
+  N4            0.0000      0.0000     71.4432    -39.9825      0.0000      0.0000
+  N5            0.0000      0.0000      9.1689    -43.4750      0.0000      0.0000
+  ········································································
+  TOTAL         0.0000      0.0000      0.0000   -138.6498      0.0000      0.0000
+
+    Total applied Fz           -0.4600 kN
+    Sum of reactions Fz        0.0000 kN
+    Equilibrium error |ΣFz + ΣwL| 0.460000 kN  ⚠ FAILED
+
+  *** EQUILIBRIUM FAILURE DIAGNOSIS ***
+  Possible causes:
+    1. Boundary conditions applied at wrong DOFs (check Section 2 restraints)
+    2. Fixed-end forces not properly transferred to global system
+    3. Load applied in wrong direction (check Section 4 load summary)
+    4. Units mismatch between load (kN/m) and length (mm) conversion
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 8 — MOMENT DIAGRAM SAMPLE STATIONS
+════════════════════════════════════════════════════════════════════════
+
+  ── Mz values at 21 stations along each element (t=0 = node I, t=1 = node J)
+  ────────────────────────────────────────────────────────────────────────
+  Sign: positive = sagging (ETABS convention)
+
+  A1  (L=4.000 m):
+    t=0→1: -213945.43  -213917.37  -213889.31  -213861.25  -213833.18  -213805.12  -213777.05  -213748.98  -213720.91  -213692.84  -213664.77  -213636.70  -213608.63  -213580.55  -213552.48  -213524.40  -213496.33  -213468.25  -213440.17  -213412.09  -213384.01
+    Peak: 213945.4340 kN·m at t=0.00 (station 0)
+
+  A2  (L=4.000 m):
+    t=0→1: 147278.77  147270.71  147262.65  147254.59  147246.53  147238.47  147230.42  147222.36  147214.31  147206.26  147198.21  147190.15  147182.10  147174.06  147166.01  147157.96  147149.92  147141.87  147133.83  147125.78  147117.74
+    Peak: 147278.7673 kN·m at t=0.00 (station 0)
+
+  B1  (L=6.000 m):
+    t=0→1: -28676.44  -28655.01  -28633.57  -28612.13  -28590.69  -28569.25  -28547.80  -28526.35  -28504.89  -28483.44  -28461.98  -28440.52  -28419.05  -28397.59  -28376.12  -28354.65  -28333.17  -28311.69  -28290.21  -28268.73  -28247.24
+    Peak: 28676.4438 kN·m at t=0.00 (station 0)
+
+  C1  (L=4.000 m):
+    t=0→1: -96808.32  -96794.16  -96779.99  -96765.82  -96751.65  -96737.48  -96723.31  -96709.14  -96694.97  -96680.80  -96666.62  -96652.45  -96638.27  -96624.10  -96609.92  -96595.74  -96581.56  -96567.38  -96553.20  -96539.02  -96524.84
+    Peak: 96808.3235 kN·m at t=0.00 (station 0)
+
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 9 — BEAM GROUPS (Display/Design Only)
+════════════════════════════════════════════════════════════════════════
+
+  WARNING: Groups have ZERO effect on stiffness matrix or analysis.
+           They are purely a post-processing and display feature.
+
+  No multi-segment beam groups detected.
+  (Groups form when ≥2 collinear beams share an intermediate degree-2 node)
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 10 — DIAGNOSTIC REPORT
+════════════════════════════════════════════════════════════════════════
+
+GLOBAL FRAME SOLVER — DIAGNOSTIC REPORT
+Generated: 2026-03-31T13:29:43.679Z
+Total nodes:    5
+Total elements: 4
+Total DOF:      30
+Free DOF:       6
+Fixed DOF:      24
+Matrix size:    6 × 6
+Solve time:     1.00 ms
+
+════════════════════════════════════════════════════════════
+  SECTION A — NODE DOF REGISTRY
+════════════════════════════════════════════════════════════
+Node ID    X(mm)      Y(mm)      Z(mm)      DOF_start  DOF indices         Connected elements
+────────────────────────────────────────────────────────────────────────────────────────────────────
+N1                 0         0         0          0  [0,1,2,3,4,5]  A1(I)
+N2              4000         0         0          6  [6,7,8,9,10,11]  A1(J), A2(I), B1(I), C1(J)
+N3              8000         0         0         12  [12,13,14,15,16,17]  A2(J)
+N4              4000      6000         0         18  [18,19,20,21,22,23]  B1(J)
+N5              4000     -4000         0         24  [24,25,26,27,28,29]  C1(I)
+
+── DOF Consistency Check ──
+✓ Node N2: 4 elements share DOFs [6,7,8,9,10,11]
+
+════════════════════════════════════════════════════════════
+  SECTION B — ELEMENT ASSEMBLY INTO GLOBAL SYSTEM
+════════════════════════════════════════════════════════════
+Elem ID    Node_I    DOFs_I                Node_J    DOFs_J                Ke_size  Ke_norm
+────────────────────────────────────────────────────────────────────────────────────────────────────
+A1         N1        [0,1,2,3,4,5]               N2        [6,7,8,9,10,11]      12×12    7.756e+10
+A2         N2        [6,7,8,9,10,11]             N3        [12,13,14,15,16,17]  12×12    7.756e+10
+B1         N2        [6,7,8,9,10,11]             N4        [18,19,20,21,22,23]  12×12    2.494e+10
+C1         N5        [24,25,26,27,28,29]         N2        [6,7,8,9,10,11]      12×12    3.741e+10
+
+════════════════════════════════════════════════════════════
+  SECTION C — NODE STIFFNESS CONTRIBUTIONS
+════════════════════════════════════════════════════════════
+
+── Each shared node must show stiffness contributions from ALL connected elements ──
+Node N2 (4 elements) — diagonal K: [2.26e+6, 1.32e+6, 5.81e+3, 1.88e+10, 2.74e+10, 1.32e+11]
+  ✓ Node N2 properly assembled with nonzero stiffness
+
+════════════════════════════════════════════════════════════
+  SECTION D — MOMENT CONSISTENCY AT SHARED NODES
+════════════════════════════════════════════════════════════
+
+── At each shared node: sum of end moments from all connected elements ≈ applied moment ──
+⚠ WARNING: Moment imbalance at Node N2: ΣMz = -55.1923 kN·m (expected ≈ 0.0000)
+
+════════════════════════════════════════════════════════════
+  SECTION E — BEAM GROUP REGISTRY (Display Only)
+════════════════════════════════════════════════════════════
+No multi-segment beam groups detected.
+
+════════════════════════════════════════════════════════════
+  SUMMARY
+════════════════════════════════════════════════════════════
+Status:   ✓ PASSED — system is consistent
+Errors:   0
+Warnings: 1
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 11 — ERROR & WARNING SUMMARY
+════════════════════════════════════════════════════════════════════════
+
+  VALIDATION FAILURES (2):
+    ✗ Test 2 — Secondary Beam-on-Primary Beam
+    ✗ Test 4 — Symmetric Model
+
+  WARNINGS (1):
+    ⚠ Moment imbalance at Node N2: ΣMz = -55.1923 kN·m (expected ≈ 0.0000)
+
+
+════════════════════════════════════════════════════════════════════════
+  SECTION 12 — RAW NODAL DISPLACEMENTS
+════════════════════════════════════════════════════════════════════════
+
+  ── Units: translations in mm, rotations in radians
+  ────────────────────────────────────────────────────────────────────────
+
+  NodeID          Ux(mm)        Uy(mm)        Uz(mm)         Rx(rad)         Ry(rad)         Rz(rad)
+  ────────────────────────────────────────────────────────────────────────
+  N1            0.000000      0.000000      0.000000        0.000e+0        0.000e+0        0.000e+0  ← fully fixed
+  N2            0.000000      0.000000     40.773102        5.954e-3        0.000e+0        0.000e+0
+  N3            0.000000      0.000000      0.000000        0.000e+0        0.000e+0        0.000e+0  ← fully fixed
+  N4            0.000000      0.000000      0.000000        0.000e+0        0.000e+0        0.000e+0  ← fully fixed
+  N5            0.000000      0.000000      0.000000        0.000e+0        0.000e+0        0.000e+0  ← fully fixed
+
+════════════════════════════════════════════════════════════════════════
+  END OF REPORT
+════════════════════════════════════════════════════════════════════════
