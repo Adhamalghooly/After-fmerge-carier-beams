@@ -452,6 +452,9 @@ export interface SlabDesignResultFull {
 }
 
 // ===================== GEOMETRY =====================
+/** Round a coordinate to 3 decimal places for stable Map key construction. */
+const coordKey = (v: number) => Math.round(v * 1000) / 1000;
+
 export function generateColumns(slabs: Slab[]): Column[] {
   const map = new Map<string, { x: number; y: number }>();
   for (const s of slabs) {
@@ -459,7 +462,7 @@ export function generateColumns(slabs: Slab[]): Column[] {
       { x: s.x1, y: s.y1 }, { x: s.x2, y: s.y1 },
       { x: s.x1, y: s.y2 }, { x: s.x2, y: s.y2 },
     ]) {
-      map.set(`${p.x},${p.y}`, p);
+      map.set(`${coordKey(p.x)},${coordKey(p.y)}`, p);
     }
   }
   const pts = [...map.values()].sort((a, b) => a.x - b.x || a.y - b.y);
@@ -491,7 +494,7 @@ export function generateBeams(slabs: Slab[], columns: Column[]): Beam[] {
     for (const e of edges) {
       const [px1, py1, px2, py2] = e.x1 < e.x2 || (e.x1 === e.x2 && e.y1 < e.y2)
         ? [e.x1, e.y1, e.x2, e.y2] : [e.x2, e.y2, e.x1, e.y1];
-      const key = `${px1},${py1}-${px2},${py2}`;
+      const key = `${coordKey(px1)},${coordKey(py1)}-${coordKey(px2)},${coordKey(py2)}`;
       if (!edgeMap.has(key)) edgeMap.set(key, { x1: px1, y1: py1, x2: px2, y2: py2, slabs: [] });
       edgeMap.get(key)!.slabs.push(s.id);
     }

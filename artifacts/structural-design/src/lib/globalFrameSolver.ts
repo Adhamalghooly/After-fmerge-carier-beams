@@ -182,7 +182,18 @@ export interface GFSValidationTest {
  */
 export class GlobalNodeRegistry {
   private nodes: Map<string, GFSNode> = new Map();
-  private coordIndex: Map<string, string> = new Map(); // "x,y,z" → nodeId
+  /**
+   * Spatial bucket index — maps a bucket key "bx,by,bz" to a list of node IDs
+   * whose coordinates fall in that bucket.
+   *
+   * ETABS philosophy: use a spatial hash so that getOrCreateNode is O(1) average
+   * instead of O(n) linear scan, enabling large models without performance degradation.
+   *
+   * Bucket size = tolerance. When looking up, we check the target bucket AND all
+   * 26 neighbours (3×3×3 grid) to guarantee we never miss a node that sits right
+   * on a bucket boundary.
+   */
+  private buckets: Map<string, string[]> = new Map();
   private nodeCounter = 0;
 
   /** Tolerance for coordinate matching (mm) */
@@ -192,35 +203,65 @@ export class GlobalNodeRegistry {
     this.tolerance = tolerance;
   }
 
+  /** Compute the integer bucket indices for a coordinate. */
+  private bucketOf(v: number): number {
+    return Math.floor(v / this.tolerance);
+  }
+
+  /** Build the Map key string for a bucket (bx, by, bz integers). */
+  private bucketKey(bx: number, by: number, bz: number): string {
+    return `${bx},${by},${bz}`;
+  }
+
   /**
    * Returns the existing node at (x,y,z) if one already exists within
    * tolerance, otherwise creates a new node.
    *
-   * This is the CORE of the shared-node principle: every call with the
-   * same coordinates returns the SAME node and therefore the SAME DOFs.
+   * This is the CORE of the shared-node principle (identical to ETABS):
+   * every call with the same physical coordinates returns the SAME node
+   * and therefore the SAME global DOF indices.
+   *
+   * Lookup is O(1) average via spatial buckets — the same approach
+   * professional FEM packages (ETABS, SAP2000) use internally.
    */
   getOrCreateNode(
     x: number, y: number, z: number,
     restraints: GFSNode['restraints'] = [false, false, false, false, false, false],
   ): GFSNode {
-    // Search for existing node within tolerance
-    for (const [, node] of this.nodes) {
-      const dx = node.x - x, dy = node.y - y, dz = node.z - z;
-      if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= this.tolerance) {
-        return node;
+    const T = this.tolerance;
+    const bx = this.bucketOf(x);
+    const by = this.bucketOf(y);
+    const bz = this.bucketOf(z);
+
+    // Check the target bucket AND all 26 neighbouring buckets (3×3×3).
+    // This guarantees correctness for nodes near bucket boundaries.
+    for (let ix = bx - 1; ix <= bx + 1; ix++) {
+      for (let iy = by - 1; iy <= by + 1; iy++) {
+        for (let iz = bz - 1; iz <= bz + 1; iz++) {
+          const bucket = this.buckets.get(this.bucketKey(ix, iy, iz));
+          if (!bucket) continue;
+          for (const nodeId of bucket) {
+            const node = this.nodes.get(nodeId)!;
+            const dx = node.x - x, dy = node.y - y, dz = node.z - z;
+            if (dx * dx + dy * dy + dz * dz <= T * T) return node;
+          }
+        }
       }
     }
 
-    // Create new node
+    // No existing node found — create a new one and register it.
     const id = `N${++this.nodeCounter}`;
     const dofStart = (this.nodeCounter - 1) * 6;
     const node: GFSNode = { id, x, y, z, restraints, dofStart };
     this.nodes.set(id, node);
-    this.coordIndex.set(`${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)}`, id);
+    const key = this.bucketKey(bx, by, bz);
+    const arr = this.buckets.get(key) ?? [];
+    arr.push(id);
+    this.buckets.set(key, arr);
     return node;
   }
 
-  /** Set restraints on an existing node (for supports) */
+  /** Set restraints on an existing node (for supports). */
   setRestraints(nodeId: string, restraints: GFSNode['restraints']): void {
     const node = this.nodes.get(nodeId);
     if (node) node.restraints = restraints;

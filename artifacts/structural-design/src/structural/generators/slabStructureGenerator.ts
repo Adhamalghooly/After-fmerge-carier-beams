@@ -1,6 +1,9 @@
 import { ModelManager } from '../model/modelManager';
 import { PINNED_RESTRAINTS, StructuralNode, Section } from '../model/types';
 
+/** Round a coordinate to 3 decimal places for stable Map key construction. */
+const coordKey = (v: number) => Math.round(v * 1000) / 1000;
+
 export interface SlabInput {
   id: string;
   x1: number;
@@ -42,7 +45,7 @@ export function generateStructureFromSlabs(
       { x: slab.x2, y: slab.y2 },
     ];
     for (const p of corners) {
-      const key = `${p.x},${p.y}`;
+      const key = `${coordKey(p.x)},${coordKey(p.y)}`;
       if (!cornerPoints.has(key)) {
         cornerPoints.add(key);
         const node = model.createNode(p.x, p.y, 0, PINNED_RESTRAINTS);
@@ -63,12 +66,12 @@ export function generateStructureFromSlabs(
     for (const e of edges) {
       const [px1, py1, px2, py2] = e.x1 < e.x2 || (e.x1 === e.x2 && e.y1 < e.y2)
         ? [e.x1, e.y1, e.x2, e.y2] : [e.x2, e.y2, e.x1, e.y1];
-      const edgeKey = `${px1},${py1}-${px2},${py2}`;
+      const edgeKey = `${coordKey(px1)},${coordKey(py1)}-${coordKey(px2)},${coordKey(py2)}`;
 
       if (!edgeSet.has(edgeKey)) {
         edgeSet.add(edgeKey);
-        const nodeI = nodeMap.get(`${px1},${py1}`);
-        const nodeJ = nodeMap.get(`${px2},${py2}`);
+        const nodeI = nodeMap.get(`${coordKey(px1)},${coordKey(py1)}`);
+        const nodeJ = nodeMap.get(`${coordKey(px2)},${coordKey(py2)}`);
         if (nodeI && nodeJ) {
           model.createBeam(nodeI.id, nodeJ.id, beamSection.id, true);
         }
@@ -87,10 +90,10 @@ export function generateStructureFromSlabs(
 
   // Step 4: Create area elements for slabs
   for (const slab of slabs) {
-    const n1 = nodeMap.get(`${slab.x1},${slab.y1}`);
-    const n2 = nodeMap.get(`${slab.x2},${slab.y1}`);
-    const n3 = nodeMap.get(`${slab.x2},${slab.y2}`);
-    const n4 = nodeMap.get(`${slab.x1},${slab.y2}`);
+    const n1 = nodeMap.get(`${coordKey(slab.x1)},${coordKey(slab.y1)}`);
+    const n2 = nodeMap.get(`${coordKey(slab.x2)},${coordKey(slab.y1)}`);
+    const n3 = nodeMap.get(`${coordKey(slab.x2)},${coordKey(slab.y2)}`);
+    const n4 = nodeMap.get(`${coordKey(slab.x1)},${coordKey(slab.y2)}`);
     if (n1 && n2 && n3 && n4) {
       model.createArea([n1.id, n2.id, n3.id, n4.id], slabThickness, true);
       slabNodeMap.set(slab.id, [n1.id, n2.id, n3.id, n4.id]);

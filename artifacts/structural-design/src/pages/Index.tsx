@@ -33,7 +33,7 @@ import AnalysisDiagramDialog from "@/components/AnalysisDiagramDialog";
 import {
   Building2, Layers, Calculator, BarChart3, Ruler, Eye,
   Grid3X3, Settings2, Download, Bot, Building, Zap, Plus, Trash2,
-  Undo2, Save, Check, RotateCcw, Wand2, Search, Compass
+  Undo2, Save, Check, Wand2, Search, Compass
 } from "lucide-react";
 import AppHeader from "@/components/AppHeader";
 import BottomNav, { type MainTab } from "@/components/BottomNav";
@@ -412,29 +412,6 @@ const Index = () => {
     // ── Legacy 3D engine path ────────────────────────────────────────────────
     const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
     if (removedColumnIds.length > 0 && detectedConnections.length > 0) {
-      // Auto-set moment releases for secondary (carried) beams at the connection point
-      // This makes the hinge visible in the modeling tab
-      for (const conn of detectedConnections) {
-        for (const secBeamId of conn.secondaryBeamIds) {
-          const beam = beamsWithLoads.find(b => b.id === secBeamId);
-          if (!beam) continue;
-          const isAtStart = beam.fromCol === conn.removedColumnId;
-          const posKey = getBeamReleaseKey(beam);
-          const nodeIRelease = isAtStart
-            ? { ux: false, uy: false, uz: false, rx: false, ry: false, rz: true }
-            : { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false };
-          const nodeJRelease = !isAtStart
-            ? { ux: false, uy: false, uz: false, rx: false, ry: false, rz: true }
-            : { ux: false, uy: false, uz: false, rx: false, ry: false, rz: false };
-          dispatch({
-            type: 'SET_FRAME_END_RELEASES',
-            posKey,
-            nodeIRestraints: nodeIRelease,
-            nodeJRestraints: nodeJRelease,
-          });
-        }
-      }
-
       const result = analyzeWithBeamOnBeam(frames, bMap, columns, mat, removedColumnIds, detectedConnections);
       dispatch({ type: 'SET_FRAME_RESULTS', results: result.frameResults });
       dispatch({ type: 'SET_BOB_CONNECTIONS', connections: result.connections });
@@ -1451,17 +1428,15 @@ const Index = () => {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {beams.map(b => {
+                          {beams.filter(b => !removedBeamIds.includes(b.id)).map(b => {
                             const isExtra = extraBeams.some(eb => eb.id === b.id);
                             const wallLoad = beamOverrides[b.id]?.wallLoad || b.wallLoad || 0;
                             const releaseState = getBeamReleaseState(b);
                             const hasRelease = Object.values(releaseState.nodeI).some(Boolean) || Object.values(releaseState.nodeJ).some(Boolean);
                             const releasedEndsCount = Number(Object.values(releaseState.nodeI).some(Boolean)) + Number(Object.values(releaseState.nodeJ).some(Boolean));
-                            // Check if this beam is a secondary (carried) beam with auto-release
-                            const isAutoReleased = detectedConnections.some(conn => conn.secondaryBeamIds.includes(b.id));
                             return (
-                            <TableRow key={b.id} className={removedBeamIds.includes(b.id) ? 'opacity-40 line-through' : ''}>
-                              <TableCell className="font-mono text-xs">{b.id}{removedBeamIds.includes(b.id) ? ' 🗑️' : ''}</TableCell>
+                            <TableRow key={b.id}>
+                              <TableCell className="font-mono text-xs">{b.id}</TableCell>
                               <TableCell className="font-mono text-xs">{b.x1.toFixed(2)}</TableCell>
                               <TableCell className="font-mono text-xs">{b.y1.toFixed(2)}</TableCell>
                               <TableCell className="font-mono text-xs">{b.x2.toFixed(2)}</TableCell>
@@ -1508,18 +1483,12 @@ const Index = () => {
                                     تحرير
                                   </Button>
                                   <Badge variant={hasRelease ? 'default' : 'outline'} className="text-[10px] whitespace-nowrap">
-                                    {hasRelease
-                                      ? `محرر ${releasedEndsCount}/2${isAutoReleased ? ' (تلقائي)' : ''}`
-                                      : (isAutoReleased ? 'تحرير تلقائي عند التحليل' : 'بدون تحرير')}
+                                    {hasRelease ? `محرر ${releasedEndsCount}/2` : 'بدون تحرير'}
                                   </Badge>
                                 </div>
                               </TableCell>
                               <TableCell>
-                                {removedBeamIds.includes(b.id) ? (
-                                  <Button onClick={() => dispatch({ type: 'TOGGLE_BEAM_REMOVAL', beamId: b.id })}
-                                    variant="outline" size="sm" className="h-8 text-xs text-primary"><RotateCcw size={14} className="mr-1" />استعادة</Button>
-                                ) : (
-                                  <Button onClick={() => {
+                                <Button onClick={() => {
                                     if (isExtra) {
                                       dispatch({ type: 'REMOVE_EXTRA_BEAM', id: b.id });
                                     } else {
@@ -1527,7 +1496,6 @@ const Index = () => {
                                     }
                                   }}
                                     variant="ghost" size="sm" className="text-destructive h-8 w-8 p-0"><Trash2 size={14} /></Button>
-                                )}
                               </TableCell>
                             </TableRow>
                             );
