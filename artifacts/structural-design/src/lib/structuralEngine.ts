@@ -989,36 +989,13 @@ export function analyzeWithBeamOnBeam(
   removedColumnIds: string[], connections: BeamOnBeamConnection[],
   maxIterations: number = 10,
   convergenceTol: number = 0.01,
-  /** Extra user-defined hinges (e.g. from end-release editor) to merge with auto-detected secondary beam hinges */
-  extraBeamHinges?: Map<string, 'I' | 'J' | 'BOTH'>
+  /** تحرير نهايات يدوي فقط (من محرر الإصدارات) — لا يوجد تحرير تلقائي للجسور المحمولة */
+  userDefinedHinges?: Map<string, 'I' | 'J' | 'BOTH'>
 ): { frameResults: FrameResult[]; connections: BeamOnBeamConnection[]; iterations: number; converged: boolean } {
-  
-  // Build hinge map for secondary (carried) beams:
-  // Each secondary beam gets a moment release (hinge) at the end connecting to the removed column.
-  // This is how ETABS/Gerber beams work: the carried beam transfers only shear (forces), not moments.
-  const secondaryBeamHinges = new Map<string, 'I' | 'J' | 'BOTH'>();
-  for (const conn of connections) {
-    for (const secBeamId of conn.secondaryBeamIds) {
-      const beam = beamsMap.get(secBeamId);
-      if (!beam) continue;
-      // Determine which end of the beam connects to the removed column
-      if (beam.fromCol === conn.removedColumnId) {
-        secondaryBeamHinges.set(secBeamId, 'I'); // Hinge at start (nodeI)
-      } else if (beam.toCol === conn.removedColumnId) {
-        secondaryBeamHinges.set(secBeamId, 'J'); // Hinge at end (nodeJ)
-      }
-    }
-  }
 
-  // Merge user-defined end releases into the hinge map.
-  // Secondary beam hinges (auto-detected) take precedence; user hinges fill the gaps.
-  if (extraBeamHinges) {
-    for (const [beamId, end] of extraBeamHinges) {
-      if (!secondaryBeamHinges.has(beamId)) {
-        secondaryBeamHinges.set(beamId, end);
-      }
-    }
-  }
+  // Only user-defined hinges are used — no automatic hinge assignment for secondary (carried) beams.
+  // The user controls end releases via the end-release editor (frameEndReleases state).
+  const secondaryBeamHinges: Map<string, 'I' | 'J' | 'BOTH'> = userDefinedHinges ?? new Map();
 
   let currentResults: FrameResult[] = frames.map(f =>
     analyzeFrame(f, beamsMap, columns, mat, removedColumnIds, undefined, secondaryBeamHinges)

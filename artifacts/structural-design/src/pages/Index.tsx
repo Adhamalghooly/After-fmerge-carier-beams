@@ -976,17 +976,9 @@ const Index = () => {
     if (!design || !beam) return;
     const wu = 1.2 * beam.deadLoad + 1.6 * beam.liveLoad;
 
-    // Determine moment release (hinge) status at each end
+    // Determine moment release (hinge) status at each end — يدوي فقط من محرر الإصدارات
     let hingeLeft = false;
     let hingeRight = false;
-    // BOB secondary beams: hinge at the removed-column end
-    for (const conn of detectedConnections) {
-      if (conn.secondaryBeamIds.includes(beamId)) {
-        if (beam.fromCol === conn.removedColumnId) hingeLeft = true;
-        if (beam.toCol   === conn.removedColumnId) hingeRight = true;
-      }
-    }
-    // User-defined frame end releases (rz = moment release)
     const releaseState = getBeamReleaseState(beam);
     if (releaseState.nodeI.rz) hingeLeft  = true;
     if (releaseState.nodeJ.rz) hingeRight = true;
