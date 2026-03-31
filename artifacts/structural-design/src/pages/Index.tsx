@@ -389,7 +389,26 @@ const Index = () => {
           setFemError('لم يُنتج محرك FEM نتائج — تحقق من إعدادات النموذج');
           return;
         }
-        const femFrameResults = adaptFEMResults(coupledResults, beamsWithLoads, frames);
+        let femFrameResults = adaptFEMResults(coupledResults, beamsWithLoads, frames);
+
+        // ── إذا كانت توجد جسور محمولة: استعمل محرك 3D للإطارات المتأثرة ──────
+        // محرك FEM لا يعالج اتصالات الجسر الحامل/المحمول بشكل صحيح (يُعطي صفراً)
+        // لذا: FEM للإطارات النظيفة، 3D للإطارات التي تحتوي جسوراً محمولة
+        if (detectedConnections.length > 0) {
+          const secondaryBeamIdSet = new Set(detectedConnections.flatMap(c => c.secondaryBeamIds));
+          const hasBobFrame = frames.some(f => f.beamIds.some(bid => secondaryBeamIdSet.has(bid)));
+          if (hasBobFrame) {
+            const results3D = getFrameResults3D(frames, beamsWithLoads, columns, mat, frameEndReleases, detectedConnections);
+            // دمج: الإطارات التي تحتوي جسوراً محمولة → 3D، الباقي → FEM
+            femFrameResults = femFrameResults.map((femRes, idx) => {
+              const frame = frames[idx];
+              if (!frame) return femRes;
+              const hasSec = frame.beamIds.some(bid => secondaryBeamIdSet.has(bid));
+              return hasSec ? (results3D[idx] ?? femRes) : femRes;
+            });
+          }
+        }
+
         dispatch({ type: 'SET_FRAME_RESULTS', results: femFrameResults });
         dispatch({ type: 'SET_BOB_CONNECTIONS', connections: [] });
       } catch (err) {

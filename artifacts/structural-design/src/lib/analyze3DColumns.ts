@@ -343,9 +343,23 @@ function build3DModelWithPatternLoading(
 
         const secElemId = `beam_${secBeamId}`;
 
-        // Hinge at the bearing end (mz and my released — biaxial)
-        const hingeRelease = { ux: false, uy: false, uz: false, mx: false, my: true, mz: true };
-        const noRelease    = { ux: false, uy: false, uz: false, mx: false, my: false, mz: false };
+        // No automatic hinge — only user-defined end releases (from frameEndReleases) are applied.
+        // The secondary beam is treated as rigidly connected at both ends by default.
+        let secReleases: Element3D['releases'] | undefined;
+        if (frameEndReleases && secFromCol && secToCol) {
+          const posKey = `${secFromCol.x.toFixed(3)}_${secFromCol.y.toFixed(3)}_${secToCol.x.toFixed(3)}_${secToCol.y.toFixed(3)}`;
+          const posKeyRev = `${secToCol.x.toFixed(3)}_${secToCol.y.toFixed(3)}_${secFromCol.x.toFixed(3)}_${secFromCol.y.toFixed(3)}`;
+          const rel = frameEndReleases[posKey] || frameEndReleases[posKeyRev];
+          if (rel) {
+            const isReversed = !!frameEndReleases[posKeyRev] && !frameEndReleases[posKey];
+            const ni = isReversed ? rel.nodeJ : rel.nodeI;
+            const nj = isReversed ? rel.nodeI : rel.nodeJ;
+            secReleases = {
+              nodeI: { ux: ni.ux, uy: ni.uy, uz: ni.uz, mx: ni.rx, my: ni.ry, mz: ni.rz },
+              nodeJ: { ux: nj.ux, uy: nj.uy, uz: nj.uz, mx: nj.rx, my: nj.ry, mz: nj.rz },
+            };
+          }
+        }
 
         const secElem: Element3D = {
           id: secElemId,
@@ -358,10 +372,7 @@ function build3DModelWithPatternLoading(
           G,
           wLocal: { wx: 0, wy: 0, wz: 0 },
           stiffnessModifier: 0.35,
-          releases: {
-            nodeI: isAtStart ? hingeRelease : noRelease,
-            nodeJ: isAtStart ? noRelease    : hingeRelease,
-          },
+          releases: secReleases,
         };
 
         // Add or replace secondary beam element
