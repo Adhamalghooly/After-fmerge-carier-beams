@@ -875,8 +875,9 @@ export function analyzeFrame(
       const Ec = 4700 * Math.sqrt(mat.fc) * 1000;
       const Lc = col.L / 1000;
       // ACI 318-19 §6.6.3.1.1 / ETABS Frame Interaction: Column stiffness modifier = 0.65
-      // (0.35 للجسور · 0.65 للأعمدة — للتفاعل الكامل بين الإطارات)
-      colStiffness = 4 * Ec * (0.65 * Ic) / Lc;
+      // Far-end factor: 4EI/L for fixed far-end, 3EI/L for pinned far-end (ACI / ETABS)
+      const farEndFactor = col.bottomEndCondition === 'P' ? 3 : 4;
+      colStiffness = farEndFactor * Ec * (0.65 * Ic) / Lc;
     }
 
     const x = i === 0 ? 0 : nodes[i - 1].x + frameBeams[i - 1].length;

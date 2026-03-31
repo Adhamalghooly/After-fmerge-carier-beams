@@ -140,9 +140,19 @@ export interface SectionProps {
 
 export function rectangularSection(b: number, h: number): SectionProps {
   const A = b * h;
-  // For rectangular section:
-  // Iy = bending about local Y axis (out-of-plane) = b*h³/12
-  // Iz = bending about local Z axis (in-plane) = h*b³/12
+  // Standard mechanics definitions (parameters are abstract dimensions):
+  //   Iy = ∫z² dA = (dimension along local y) × (dimension along local z)³ / 12
+  //      = b × h³ / 12   where b is the dimension along the LOCAL Y axis
+  //                       and h is the dimension along the LOCAL Z axis.
+  //   Iz = ∫y² dA = h × b³ / 12
+  //
+  // IMPORTANT: The caller must pass parameters in (local-y-dim, local-z-dim) order.
+  //   • Beams: call as rectangularSection(elem.h, elem.b)
+  //            (beam depth h is along local Y = Global Z; width b is along local Z)
+  //            → Iy = h×b³/12 (minor), Iz = b×h³/12 (major ← gravity bending)
+  //   • Columns: call as rectangularSection(elem.b, elem.h)
+  //            (col width b is along local Y = Global X; depth h is along local Z = Global Y)
+  //            → Iy = b×h³/12, Iz = h×b³/12
   const Iy = b * Math.pow(h, 3) / 12;
   const Iz = h * Math.pow(b, 3) / 12;
   
@@ -900,7 +910,24 @@ export function analyze3DFrame(
     );
     const T = buildTransformMatrix12(R);
     
-    const section = rectangularSection(elem.b, elem.h);
+    // For HORIZONTAL BEAMS: the cross-section lies in the local YZ plane where
+    //   local Y = Global Z (vertical = beam depth h) and local Z = Global ±Y (horizontal = beam width b).
+    //   Standard definitions:
+    //     Iz = ∫y² dA = b×h³/12  (major axis — gravity bending about local Z)
+    //     Iy = ∫z² dA = h×b³/12  (minor axis — lateral bending about local Y)
+    //   rectangularSection(p1,p2) computes: Iy = p1×p2³/12, Iz = p2×p1³/12.
+    //   So to get Iz = b×h³/12 we must pass (h, b) → Iz = b×h³/12  ✓
+    //
+    // For VERTICAL COLUMNS: local Y = Global X (dim b) and local Z = Global Y (dim h).
+    //   Correct:  Iy = b×h³/12, Iz = h×b³/12
+    //   rectangularSection(b, h) → Iy = b×h³/12  ✓   Iz = h×b³/12  ✓
+    //
+    // This swap fixes the previous bug where horizontal-beam gravity bending
+    // was using the MINOR-AXIS inertia (h×b³/12) instead of the MAJOR-AXIS (b×h³/12),
+    // causing beam stiffness to be (h/b)² ≈ 4× too small for typical beams (b=250, h=500).
+    const section = elem.type === 'beam'
+      ? rectangularSection(elem.h, elem.b)   // beam: pass depth first → Iz = b×h³/12 (major axis)
+      : rectangularSection(elem.b, elem.h);  // column: pass width first → Iy = b×h³/12, Iz = h×b³/12
     let ke_local = elementStiffnessLocal(L, elem.E, elem.G, section, elem.stiffnessModifier);
     let fef_needs_condensation = false;
     
