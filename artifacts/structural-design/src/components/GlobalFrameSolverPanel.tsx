@@ -33,6 +33,7 @@ import {
   buildConnectivityMap,
   runAllValidationTests,
   sampleMomentDiagram,
+  generateFullSolverReport,
   type GFSElement,
   type GFSMaterial,
   type GFSLoad,
@@ -260,6 +261,7 @@ const ConnectivityMapSVG: React.FC<{ map: ConnectivityMap }> = ({ map }) => {
 const GlobalFrameSolverPanel: React.FC = () => {
   const [activeTab, setActiveTab] = useState('overview');
   const [isRunning, setIsRunning] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Build demo model once
   const { reg, elements, load } = useMemo(() => buildDemoModel(), []);
@@ -322,26 +324,68 @@ const GlobalFrameSolverPanel: React.FC = () => {
     a.click(); URL.revokeObjectURL(url);
   }, [diagReport]);
 
+  // Export full report — runs ALL validation tests then assembles 12-section report
+  const exportFullReport = useCallback(() => {
+    setIsExporting(true);
+    setTimeout(() => {
+      try {
+        // Always run fresh validation for the report
+        const freshTests = runAllValidationTests();
+        const reportText = generateFullSolverReport({
+          nodes,
+          elements,
+          load,
+          result,
+          beamGroups,
+          validationTests: freshTests,
+          diagReport,
+          solverVersion: '1.0.0',
+        });
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const blob = new Blob([reportText], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `solver_full_report_${timestamp}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        // Also update testResults state so Validation tab reflects fresh run
+        setTestResults(freshTests);
+      } finally {
+        setIsExporting(false);
+      }
+    }, 80);
+  }, [nodes, elements, load, result, beamGroups, diagReport]);
+
   const passedAll = testResults?.every(t => t.passed) ?? false;
 
   return (
     <div className="h-full flex flex-col overflow-hidden bg-background">
       {/* Header */}
       <div className="flex-shrink-0 px-4 pt-4 pb-2 border-b border-border/50">
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
             <h2 className="text-base font-bold text-foreground">3D Global Frame Solver</h2>
             <p className="text-xs text-muted-foreground mt-0.5">
               ETABS-like Direct Stiffness Method — K·U = F (one global system)
             </p>
           </div>
-          <div className="flex gap-2">
-            <Badge variant="outline" className="text-xs gap-1">
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <Badge variant="outline" className="text-xs gap-1 hidden sm:flex">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
               {nodes.length} nodes
             </Badge>
-            <Badge variant="outline" className="text-xs">{result.totalDOF} DOFs</Badge>
-            <Badge variant="outline" className="text-xs">{result.matrixSize}×{result.matrixSize} matrix</Badge>
+            <Badge variant="outline" className="text-xs hidden sm:flex">{result.totalDOF} DOFs</Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs gap-1.5 border-amber-500/40 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300"
+              onClick={exportFullReport}
+              disabled={isExporting}
+            >
+              <Download size={12} />
+              {isExporting ? 'Generating…' : 'Export Full Report'}
+            </Button>
           </div>
         </div>
       </div>

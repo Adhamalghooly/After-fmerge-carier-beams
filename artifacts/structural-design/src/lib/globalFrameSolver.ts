@@ -1492,6 +1492,458 @@ export function runAllValidationTests(): GFSValidationTest[] {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// FULL SOLVER REPORT — comprehensive export for debugging
+// ─────────────────────────────────────────────────────────────────
+
+export interface FullSolverReportInput {
+  nodes: GFSNode[];
+  elements: GFSElement[];
+  load: GFSLoad;
+  result: GFSSolverResult;
+  beamGroups: GFSBeamGroup[];
+  validationTests: GFSValidationTest[];
+  diagReport: GFSDiagnosticReport;
+  solverVersion?: string;
+}
+
+/**
+ * Generate a single self-contained plain-text report containing:
+ *   SECTION 0  — Header & metadata
+ *   SECTION 1  — System summary (nodes, DOFs, matrix, timing)
+ *   SECTION 2  — Node registry (coords, DOFs, restraints, connections)
+ *   SECTION 3  — Element registry (section, material, loads, modifier)
+ *   SECTION 4  — Load summary (nodal + element distributed)
+ *   SECTION 5  — Validation test results (all 4 tests, pass/fail, expected/actual)
+ *   SECTION 6  — Element force results (all 6 components at each end)
+ *   SECTION 7  — Support reactions + global equilibrium check
+ *   SECTION 8  — Moment diagram stations (21 pts per element)
+ *   SECTION 9  — Beam groups
+ *   SECTION 10 — Diagnostic report (DOF consistency, assembly, equilibrium)
+ *   SECTION 11 — Error & warning summary
+ *   SECTION 12 — Raw nodal displacements
+ *
+ * When you receive this file, every number, flag, and error message
+ * needed to diagnose a problem is present — no UI access required.
+ */
+export function generateFullSolverReport(input: FullSolverReportInput): string {
+  const {
+    nodes, elements, load, result,
+    beamGroups, validationTests, diagReport,
+    solverVersion = '1.0.0',
+  } = input;
+
+  const lines: string[] = [];
+
+  const hr1 = '═'.repeat(72);
+  const hr2 = '─'.repeat(72);
+  const hr3 = '·'.repeat(72);
+
+  const hdr = (s: string) => {
+    lines.push(''); lines.push(hr1);
+    lines.push(`  ${s}`);
+    lines.push(hr1);
+  };
+  const sub = (s: string) => { lines.push(''); lines.push(`  ── ${s}`); lines.push('  ' + hr2); };
+  const ln  = (s = '') => lines.push(s);
+  const col = (label: string, value: string | number, width = 28) =>
+    `  ${label.padEnd(width)} ${value}`;
+
+  // ── SECTION 0: Header ────────────────────────────────────────────
+  hdr('GLOBAL FRAME SOLVER — FULL ANALYSIS REPORT');
+  ln(col('Generated',        new Date().toISOString()));
+  ln(col('Solver version',   solverVersion));
+  ln(col('Report purpose',   'Full export for debugging and validation'));
+  ln();
+  ln('  HOW TO USE THIS REPORT:');
+  ln('  • Section 5  — Check validation pass/fail and expected vs actual values');
+  ln('  • Section 6  — Check element forces for sign errors or magnitude issues');
+  ln('  • Section 7  — Check global equilibrium (ΣFz must equal total applied load)');
+  ln('  • Section 10 — Check DOF consistency and moment equilibrium at shared nodes');
+  ln('  • Section 11 — All errors and warnings in one place');
+
+  // ── SECTION 1: System Summary ────────────────────────────────────
+  hdr('SECTION 1 — SYSTEM SUMMARY');
+  ln(col('Total nodes',      nodes.length));
+  ln(col('Total elements',   elements.length));
+  ln(col('Total DOF',        result.totalDOF));
+  ln(col('Free DOF',         result.freeDOF));
+  ln(col('Fixed DOF',        result.fixedDOF));
+  ln(col('Reduced matrix',   `${result.matrixSize} × ${result.matrixSize}`));
+  ln(col('Solve time',       `${result.solveTimeMs.toFixed(3)} ms`));
+  ln(col('Beam groups',      beamGroups.length));
+  ln(col('Validation tests', `${validationTests.filter(t => t.passed).length} / ${validationTests.length} passed`));
+  ln(col('Diagnostic status', diagReport.passed ? 'PASSED' : `FAILED (${diagReport.errors.length} errors)`));
+
+  // ── SECTION 2: Node Registry ─────────────────────────────────────
+  hdr('SECTION 2 — NODE REGISTRY');
+  sub('Each node shows: ID, coordinates (mm), DOF start, restraints, connected elements');
+
+  // Build node → elements map
+  const nodeConnsMap = new Map<string, string[]>();
+  for (const e of elements) {
+    for (const nid of [e.nodeI, e.nodeJ]) {
+      const arr = nodeConnsMap.get(nid) ?? [];
+      arr.push(e.id);
+      nodeConnsMap.set(nid, arr);
+    }
+  }
+
+  ln();
+  ln('  ' + [
+    'ID'.padEnd(6),
+    'X(mm)'.padStart(9),
+    'Y(mm)'.padStart(9),
+    'Z(mm)'.padStart(9),
+    'dofStart'.padStart(10),
+    'DOFs'.padEnd(20),
+    'Restraints[Ux,Uy,Uz,Rx,Ry,Rz]'.padEnd(32),
+    'Connected',
+  ].join('  '));
+  ln('  ' + hr2);
+  for (const n of nodes) {
+    const dofs = `[${Array.from({ length: 6 }, (_, k) => n.dofStart + k).join(',')}]`;
+    const rest = `[${n.restraints.map(r => r ? '1' : '0').join(',')}]`;
+    const conns = (nodeConnsMap.get(n.id) ?? []).join(',');
+    ln('  ' + [
+      n.id.padEnd(6),
+      n.x.toFixed(0).padStart(9),
+      n.y.toFixed(0).padStart(9),
+      n.z.toFixed(0).padStart(9),
+      n.dofStart.toString().padStart(10),
+      dofs.padEnd(20),
+      rest.padEnd(32),
+      conns,
+    ].join('  '));
+  }
+
+  // ── SECTION 3: Element Registry ──────────────────────────────────
+  hdr('SECTION 3 — ELEMENT REGISTRY');
+  ln();
+  ln('  ' + [
+    'ID'.padEnd(8),
+    'Type'.padEnd(8),
+    'NodeI'.padEnd(7),
+    'NodeJ'.padEnd(7),
+    'b(mm)'.padStart(7),
+    'h(mm)'.padStart(7),
+    'A(mm²)'.padStart(10),
+    'Iy(mm⁴)'.padStart(14),
+    'Iz(mm⁴)'.padStart(14),
+    'J(mm⁴)'.padStart(14),
+    'E(MPa)'.padStart(8),
+    'G(MPa)'.padStart(8),
+    'Modifier'.padStart(10),
+    'Releases',
+  ].join('  '));
+  ln('  ' + hr2);
+  for (const e of elements) {
+    const s = e.section;
+    const ri = e.releasesI ? Object.entries(e.releasesI).filter(([, v]) => v).map(([k]) => `I.${k}`).join(',') : '';
+    const rj = e.releasesJ ? Object.entries(e.releasesJ).filter(([, v]) => v).map(([k]) => `J.${k}`).join(',') : '';
+    const rel = [ri, rj].filter(Boolean).join(' ') || 'none';
+    ln('  ' + [
+      e.id.padEnd(8),
+      e.type.padEnd(8),
+      e.nodeI.padEnd(7),
+      e.nodeJ.padEnd(7),
+      s.b.toFixed(0).padStart(7),
+      s.h.toFixed(0).padStart(7),
+      s.A.toFixed(0).padStart(10),
+      s.Iy.toExponential(3).padStart(14),
+      s.Iz.toExponential(3).padStart(14),
+      s.J.toExponential(3).padStart(14),
+      e.material.E.toFixed(0).padStart(8),
+      e.material.G.toFixed(0).padStart(8),
+      e.stiffnessModifier.toFixed(2).padStart(10),
+      rel,
+    ].join('  '));
+  }
+
+  // ── SECTION 4: Load Summary ───────────────────────────────────────
+  hdr('SECTION 4 — LOAD SUMMARY');
+
+  sub('Element distributed loads (global coords, kN/m)');
+  ln();
+  if (load.elementLoads && load.elementLoads.size > 0) {
+    ln('  ' + ['ElemID'.padEnd(10), 'wx(kN/m)'.padStart(10), 'wy(kN/m)'.padStart(10), 'wz(kN/m)'.padStart(10), 'NOTE'].join('  '));
+    ln('  ' + hr3);
+    for (const [eid, w] of load.elementLoads) {
+      const note = w.wz < 0 ? '← gravity (downward)' : w.wz > 0 ? '← upward' : '';
+      ln('  ' + [
+        eid.padEnd(10),
+        w.wx.toFixed(3).padStart(10),
+        w.wy.toFixed(3).padStart(10),
+        w.wz.toFixed(3).padStart(10),
+        `  ${note}`,
+      ].join('  '));
+    }
+    // Total load
+    let totalLoad_kN = 0;
+    for (const [eid, w] of load.elementLoads) {
+      const e = elements.find(el => el.id === eid);
+      if (!e) continue;
+      const nI = nodes.find(n => n.id === e.nodeI)!, nJ = nodes.find(n => n.id === e.nodeJ)!;
+      const L = Math.sqrt((nJ.x-nI.x)**2 + (nJ.y-nI.y)**2 + (nJ.z-nI.z)**2) / 1000; // m
+      totalLoad_kN += Math.abs(w.wz) * L;
+    }
+    ln();
+    ln(col('  Total gravity load (ΣwzL)', `${totalLoad_kN.toFixed(3)} kN`));
+  } else {
+    ln('  (no element distributed loads)');
+  }
+
+  sub('Nodal loads (kN, kN·m)');
+  ln();
+  if (load.nodalLoads && load.nodalLoads.size > 0) {
+    ln('  ' + ['NodeID'.padEnd(10), 'Fx'.padStart(8), 'Fy'.padStart(8), 'Fz'.padStart(8), 'Mx'.padStart(8), 'My'.padStart(8), 'Mz'.padStart(8)].join('  '));
+    for (const [nid, f] of load.nodalLoads) {
+      ln('  ' + [
+        nid.padEnd(10),
+        ...f.map(v => v.toFixed(3).padStart(8)),
+      ].join('  '));
+    }
+  } else {
+    ln('  (no nodal loads)');
+  }
+
+  // ── SECTION 5: Validation Tests ──────────────────────────────────
+  hdr('SECTION 5 — VALIDATION TEST RESULTS');
+  ln();
+
+  const allPassed = validationTests.every(t => t.passed);
+  ln(`  Overall: ${allPassed ? '✓ ALL PASSED' : `✗ ${validationTests.filter(t => !t.passed).length} FAILED`}`);
+  ln();
+
+  for (let i = 0; i < validationTests.length; i++) {
+    const t = validationTests[i];
+    sub(`Test ${i + 1}: ${t.name}  [${t.passed ? 'PASS' : 'FAIL'}]`);
+    ln(`  Description: ${t.description}`);
+    ln();
+    ln('  Details:');
+    for (const d of t.details) ln(`    ${d}`);
+    ln();
+    ln('  Expected values:');
+    for (const [k, v] of Object.entries(t.expected)) {
+      ln(`    ${k.padEnd(30)} = ${typeof v === 'number' ? v.toFixed(6) : v}`);
+    }
+    ln('  Actual values:');
+    for (const [k, v] of Object.entries(t.actual)) {
+      const exp = (t.expected as Record<string, number>)[k];
+      const err = (exp !== undefined && typeof v === 'number' && Math.abs(exp) > 1e-10)
+        ? `  (error = ${(Math.abs((v as number) - exp) / Math.abs(exp) * 100).toFixed(2)}%)`
+        : '';
+      ln(`    ${k.padEnd(30)} = ${typeof v === 'number' ? (v as number).toFixed(6) : v}${err}`);
+    }
+    if (!t.passed) {
+      ln();
+      ln('  *** FAILURE DIAGNOSIS ***');
+      ln('  Possible causes:');
+      ln('    1. Shared node DOFs are not truly identical (check Section 10 DOF consistency)');
+      ln('    2. Fixed-end force transformation error (check transformation matrix T)');
+      ln('    3. Boundary condition not applied correctly (check Section 2 restraints)');
+      ln('    4. Static condensation error for releases (check release DOF indices)');
+    }
+  }
+
+  // ── SECTION 6: Element Force Results ─────────────────────────────
+  hdr('SECTION 6 — ELEMENT FORCE RESULTS');
+  sub('Forces in LOCAL element coordinates — [Fx,Fy,Fz,Mx,My,Mz] at node I and J');
+  ln();
+  ln('  Units: forces in kN, moments in kN·m');
+  ln('  Sign convention: Fx+ = tension, Mz+ = sagging (ETABS)');
+  ln();
+
+  for (const er of result.elementResults) {
+    const e = elements.find(el => el.id === er.elementId);
+    const nI = e ? nodes.find(n => n.id === e.nodeI) : undefined;
+    const nJ = e ? nodes.find(n => n.id === e.nodeJ) : undefined;
+    const L = nI && nJ
+      ? Math.sqrt((nJ.x-nI.x)**2 + (nJ.y-nI.y)**2 + (nJ.z-nI.z)**2) / 1000
+      : 0;
+
+    ln(`  Element: ${er.elementId}  |  L = ${L.toFixed(3)} m`);
+    ln(`    Node I (${e?.nodeI ?? '?'}):  Fx=${er.forceI[0].toFixed(4)}  Fy=${er.forceI[1].toFixed(4)}  Fz=${er.forceI[2].toFixed(4)}  Mx=${er.forceI[3].toFixed(4)}  My=${er.forceI[4].toFixed(4)}  Mz=${er.forceI[5].toFixed(4)}`);
+    ln(`    Node J (${e?.nodeJ ?? '?'}):  Fx=${er.forceJ[0].toFixed(4)}  Fy=${er.forceJ[1].toFixed(4)}  Fz=${er.forceJ[2].toFixed(4)}  Mx=${er.forceJ[3].toFixed(4)}  My=${er.forceJ[4].toFixed(4)}  Mz=${er.forceJ[5].toFixed(4)}`);
+    ln(`    Derived:  Axial=${er.axial.toFixed(4)} kN  ShearY=${er.shearY.toFixed(4)} kN  ShearZ=${er.shearZ.toFixed(4)} kN`);
+    ln(`              MzI=${er.momentZI.toFixed(4)} kN·m  MzJ=${er.momentZJ.toFixed(4)} kN·m  Mz_mid=${er.momentZmid.toFixed(4)} kN·m`);
+    ln(`              MyI=${er.momentYI.toFixed(4)} kN·m  MyJ=${er.momentYJ.toFixed(4)} kN·m  Torsion=${er.torsion.toFixed(4)} kN·m`);
+
+    // Element self-equilibrium check: ΣFy at I and J should balance load
+    const VyI = er.forceI[1], VyJ = er.forceJ[1];
+    const wElem = load.elementLoads?.get(er.elementId);
+    const wz = wElem?.wz ?? 0;
+    const totalVy = VyI + VyJ;
+    const expectedVy = wz < 0 ? -(wz / 1000 * L * 1000) : 0; // N/mm × mm → N → kN
+    const vyCheck = Math.abs(totalVy - wz / 1000 * L) < 0.5;
+    ln(`    Self-equilibrium (ΣVy = w·L): VyI+VyJ = ${totalVy.toFixed(4)}  w·L = ${(wz / 1000 * L).toFixed(4)}  ${vyCheck ? '✓ OK' : '⚠ CHECK'}`);
+    ln();
+  }
+
+  // ── SECTION 7: Support Reactions + Equilibrium ───────────────────
+  hdr('SECTION 7 — SUPPORT REACTIONS & GLOBAL EQUILIBRIUM');
+  ln();
+  ln('  ' + ['NodeID'.padEnd(8), 'Fx(kN)'.padStart(10), 'Fy(kN)'.padStart(10), 'Fz(kN)'.padStart(10), 'Mx(kN·m)'.padStart(10), 'My(kN·m)'.padStart(10), 'Mz(kN·m)'.padStart(10)].join('  '));
+  ln('  ' + hr2);
+
+  let sumFx = 0, sumFy = 0, sumFz = 0, sumMx = 0, sumMy = 0, sumMz = 0;
+  for (const [nid, r] of result.reactions) {
+    ln('  ' + [
+      nid.padEnd(8),
+      r[0].toFixed(4).padStart(10),
+      r[1].toFixed(4).padStart(10),
+      r[2].toFixed(4).padStart(10),
+      r[3].toFixed(4).padStart(10),
+      r[4].toFixed(4).padStart(10),
+      r[5].toFixed(4).padStart(10),
+    ].join('  '));
+    sumFx += r[0]; sumFy += r[1]; sumFz += r[2];
+    sumMx += r[3]; sumMy += r[4]; sumMz += r[5];
+  }
+  ln('  ' + hr3);
+  ln('  ' + ['TOTAL'.padEnd(8),
+    sumFx.toFixed(4).padStart(10), sumFy.toFixed(4).padStart(10), sumFz.toFixed(4).padStart(10),
+    sumMx.toFixed(4).padStart(10), sumMy.toFixed(4).padStart(10), sumMz.toFixed(4).padStart(10)].join('  '));
+
+  // Compute total applied load
+  let totalAppliedFz = 0;
+  if (load.elementLoads) {
+    for (const [eid, w] of load.elementLoads) {
+      const e = elements.find(el => el.id === eid);
+      if (!e) continue;
+      const nI = nodes.find(n => n.id === e.nodeI)!, nJ = nodes.find(n => n.id === e.nodeJ)!;
+      const L = Math.sqrt((nJ.x-nI.x)**2 + (nJ.y-nI.y)**2 + (nJ.z-nI.z)**2) / 1000;
+      totalAppliedFz += w.wz / 1000 * L;
+    }
+  }
+  if (load.nodalLoads) {
+    for (const [, f] of load.nodalLoads) totalAppliedFz += (f[2] ?? 0);
+  }
+
+  ln();
+  ln(col('  Total applied Fz', `${totalAppliedFz.toFixed(4)} kN`));
+  ln(col('  Sum of reactions Fz', `${sumFz.toFixed(4)} kN`));
+  const equilError = Math.abs(sumFz + totalAppliedFz);
+  const equilOk = equilError < Math.max(0.01, Math.abs(totalAppliedFz) * 0.001);
+  ln(col('  Equilibrium error |ΣFz + ΣwL|', `${equilError.toFixed(6)} kN  ${equilOk ? '✓ OK' : '⚠ FAILED'}`));
+  if (!equilOk) {
+    ln();
+    ln('  *** EQUILIBRIUM FAILURE DIAGNOSIS ***');
+    ln('  Possible causes:');
+    ln('    1. Boundary conditions applied at wrong DOFs (check Section 2 restraints)');
+    ln('    2. Fixed-end forces not properly transferred to global system');
+    ln('    3. Load applied in wrong direction (check Section 4 load summary)');
+    ln('    4. Units mismatch between load (kN/m) and length (mm) conversion');
+  }
+
+  // ── SECTION 8: Moment Diagram Stations ───────────────────────────
+  hdr('SECTION 8 — MOMENT DIAGRAM SAMPLE STATIONS');
+  sub('Mz values at 21 stations along each element (t=0 = node I, t=1 = node J)');
+  ln('  Sign: positive = sagging (ETABS convention)');
+  ln();
+
+  for (const er of result.elementResults) {
+    const e = elements.find(el => el.id === er.elementId);
+    if (!e) continue;
+    const nI = nodes.find(n => n.id === e.nodeI)!, nJ = nodes.find(n => n.id === e.nodeJ)!;
+    const L = Math.sqrt((nJ.x-nI.x)**2 + (nJ.y-nI.y)**2 + (nJ.z-nI.z)**2);
+    const wGlobal = load.elementLoads?.get(e.id) ?? { wx: 0, wy: 0, wz: 0 };
+    const wyLocal = -wGlobal.wz;
+    const samples = sampleMomentDiagram(er, L, wyLocal, 20);
+
+    ln(`  ${er.elementId}  (L=${(L/1000).toFixed(3)} m):`);
+    const row = samples.map(s => `${s.Mz_kNm.toFixed(2)}`).join('  ');
+    ln(`    t=0→1: ${row}`);
+    const maxMz = Math.max(...samples.map(s => Math.abs(s.Mz_kNm)));
+    const maxIdx = samples.findIndex(s => Math.abs(s.Mz_kNm) === maxMz);
+    ln(`    Peak: ${maxMz.toFixed(4)} kN·m at t=${samples[maxIdx]?.t.toFixed(2)} (station ${maxIdx})`);
+    ln();
+  }
+
+  // ── SECTION 9: Beam Groups ────────────────────────────────────────
+  hdr('SECTION 9 — BEAM GROUPS (Display/Design Only)');
+  ln();
+  ln('  WARNING: Groups have ZERO effect on stiffness matrix or analysis.');
+  ln('           They are purely a post-processing and display feature.');
+  ln();
+  if (beamGroups.length === 0) {
+    ln('  No multi-segment beam groups detected.');
+    ln('  (Groups form when ≥2 collinear beams share an intermediate degree-2 node)');
+  } else {
+    for (const g of beamGroups) {
+      ln(`  Group ${g.groupId}:`);
+      ln(`    Elements:    ${g.elementIds.join(' → ')}`);
+      ln(`    Total span:  ${(g.totalLength / 1000).toFixed(3)} m`);
+      ln(`    Direction:   [${g.direction.map(v => v.toFixed(4)).join(', ')}]`);
+      ln(`    Segments:    ${g.elementIds.length}`);
+      ln();
+    }
+  }
+
+  // ── SECTION 10: Diagnostic Report ────────────────────────────────
+  hdr('SECTION 10 — DIAGNOSTIC REPORT');
+  ln();
+  ln(diagReport.text);
+
+  // ── SECTION 11: Error & Warning Summary ──────────────────────────
+  hdr('SECTION 11 — ERROR & WARNING SUMMARY');
+  ln();
+
+  const failedTests = validationTests.filter(t => !t.passed);
+  const totalErrors   = diagReport.errors.length + failedTests.length;
+  const totalWarnings = diagReport.warnings.length;
+
+  if (totalErrors === 0 && totalWarnings === 0) {
+    ln('  ✓ No errors or warnings detected. System is consistent and tests pass.');
+  } else {
+    if (failedTests.length > 0) {
+      ln(`  VALIDATION FAILURES (${failedTests.length}):`);
+      for (const t of failedTests) ln(`    ✗ ${t.name}`);
+      ln();
+    }
+    if (diagReport.errors.length > 0) {
+      ln(`  DIAGNOSTIC ERRORS (${diagReport.errors.length}):`);
+      for (const e of diagReport.errors) ln(`    ✗ ${e}`);
+      ln();
+    }
+    if (diagReport.warnings.length > 0) {
+      ln(`  WARNINGS (${diagReport.warnings.length}):`);
+      for (const w of diagReport.warnings) ln(`    ⚠ ${w}`);
+      ln();
+    }
+  }
+
+  // ── SECTION 12: Raw Nodal Displacements ──────────────────────────
+  hdr('SECTION 12 — RAW NODAL DISPLACEMENTS');
+  sub('Units: translations in mm, rotations in radians');
+  ln();
+  ln('  ' + ['NodeID'.padEnd(8), 'Ux(mm)'.padStart(12), 'Uy(mm)'.padStart(12), 'Uz(mm)'.padStart(12), 'Rx(rad)'.padStart(14), 'Ry(rad)'.padStart(14), 'Rz(rad)'.padStart(14)].join('  '));
+  ln('  ' + hr2);
+  for (const n of nodes) {
+    const d = result.displacements.get(n.id) ?? [0, 0, 0, 0, 0, 0];
+    const isFixed = n.restraints.every(r => r);
+    const suffix = isFixed ? '  ← fully fixed' : '';
+    ln('  ' + [
+      n.id.padEnd(8),
+      d[0].toFixed(6).padStart(12),
+      d[1].toFixed(6).padStart(12),
+      d[2].toFixed(6).padStart(12),
+      d[3].toExponential(3).padStart(14),
+      d[4].toExponential(3).padStart(14),
+      d[5].toExponential(3).padStart(14),
+    ].join('  ') + suffix);
+  }
+
+  // ── Footer ───────────────────────────────────────────────────────
+  ln();
+  ln(hr1);
+  ln('  END OF REPORT');
+  ln(hr1);
+  ln();
+
+  return lines.join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────
 // MOMENT DIAGRAM HELPER (for UI rendering)
 // ─────────────────────────────────────────────────────────────────
 
