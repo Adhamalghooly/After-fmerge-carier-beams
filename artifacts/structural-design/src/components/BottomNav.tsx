@@ -1,6 +1,6 @@
-import { FileText, Settings2, Compass, FolderOpen } from 'lucide-react';
+import { FileText, Settings2, Compass, FolderOpen, Cpu } from 'lucide-react';
 
-export type MainTab = 'reports' | 'inputs' | 'modeling' | 'projects';
+export type MainTab = 'reports' | 'inputs' | 'modeling' | 'projects' | 'solver';
 
 interface BottomNavProps {
   activeTab: MainTab;
@@ -11,6 +11,7 @@ const tabs: { id: MainTab; label: string; icon: typeof FileText }[] = [
   { id: 'projects', label: 'PROJECTS', icon: FolderOpen },
   { id: 'inputs', label: 'INPUTS', icon: Settings2 },
   { id: 'modeling', label: 'MODELING', icon: Compass },
+  { id: 'solver', label: 'SOLVER', icon: Cpu },
   { id: 'reports', label: 'REPORTS', icon: FileText },
 ];
 

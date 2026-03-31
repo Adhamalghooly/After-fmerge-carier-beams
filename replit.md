@@ -4,6 +4,22 @@
 
 pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
 
+## Global Frame Solver (ETABS-like 3D DSM)
+
+Located at `artifacts/structural-design/src/lib/globalFrameSolver.ts`.
+
+Core architecture mirrors ETABS Direct Stiffness Method:
+
+- **Single global system**: K_global × U = F_global — one matrix, one solve
+- **GlobalNodeRegistry**: `getOrCreateNode(x,y,z)` ensures shared nodes between intersecting beams
+- **Beam-on-beam interaction**: emerges automatically from shared DOFs — no load transfer code
+- **End releases**: static condensation K* = K_rr − K_rc·K_cc⁻¹·K_cr
+- **Beam groups**: display/design only — zero effect on stiffness or analysis
+- **Diagnostic report**: DOF consistency, assembly verification, moment equilibrium checks → `debug_global_system.txt`
+- **Validation tests**: 4 tests (simple beam, beam-on-beam, multi-level, symmetry)
+
+UI panel at `artifacts/structural-design/src/components/GlobalFrameSolverPanel.tsx` — accessible via SOLVER tab in bottom nav.
+
 ## Stack
 
 - **Monorepo tool**: pnpm workspaces

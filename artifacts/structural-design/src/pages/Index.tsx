@@ -61,6 +61,7 @@ import ProjectManager from "@/components/ProjectManager";
 import LevelPlanView from "@/components/LevelPlanView";
 import LoadComparisonPanel from "@/components/LoadComparisonPanel";
 import FEMComparisonPanel  from "@/components/FEMComparisonPanel";
+import GlobalFrameSolverPanel from "@/components/GlobalFrameSolverPanel";
 
 const ParamInput = ({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) => (
   <div className="space-y-1">
@@ -2571,6 +2572,11 @@ const Index = () => {
             />
           </TabsContent>
 
+          {/* GLOBAL FRAME SOLVER TAB */}
+          <TabsContent value="solver" className="flex-1 overflow-hidden mt-0">
+            <GlobalFrameSolverPanel />
+          </TabsContent>
+
           {/* PROJECTS TAB */}
           <TabsContent value="projects" className="flex-1 overflow-hidden mt-0">
             <ProjectManager
@@ -2708,6 +2714,7 @@ const Index = () => {
           else if (tab === 'inputs') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'input' });
           else if (tab === 'modeling') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'modeler' });
           else if (tab === 'projects') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'projects' });
+          else if (tab === 'solver') dispatch({ type: 'SET_ACTIVE_TAB', tab: 'solver' });
         }}
       />
     </div>
