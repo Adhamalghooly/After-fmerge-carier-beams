@@ -409,6 +409,40 @@ const Index = () => {
       // لا يوجد return هنا — يكمل التنفيذ إلى المسار التالي
     }
 
+    // ── Build 2D hinge map from user-defined end releases (frameEndReleases → rz = rotation in 2D) ──
+    const build2DHingeMap = (): Map<string, 'I' | 'J' | 'BOTH'> => {
+      const hingeMap = new Map<string, 'I' | 'J' | 'BOTH'>();
+      for (const beam of beamsWithLoads) {
+        const rs = getBeamReleaseState(beam);
+        const hasHingeI = rs.nodeI.rx || rs.nodeI.ry || rs.nodeI.rz;
+        const hasHingeJ = rs.nodeJ.rx || rs.nodeJ.ry || rs.nodeJ.rz;
+        if (hasHingeI && hasHingeJ) hingeMap.set(beam.id, 'BOTH');
+        else if (hasHingeI) hingeMap.set(beam.id, 'I');
+        else if (hasHingeJ) hingeMap.set(beam.id, 'J');
+      }
+      return hingeMap;
+    };
+
+    // ── Legacy 2D engine path (Matrix Stiffness Method) ─────────────────────
+    if (selectedEngine === 'legacy_2d') {
+      const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
+      const beamHinges2D = build2DHingeMap();
+      if (removedColumnIds.length > 0 && detectedConnections.length > 0) {
+        const result = analyzeWithBeamOnBeam(frames, bMap, columns, mat, removedColumnIds, detectedConnections, 10, 0.01, beamHinges2D);
+        dispatch({ type: 'SET_FRAME_RESULTS', results: result.frameResults });
+        dispatch({ type: 'SET_BOB_CONNECTIONS', connections: result.connections });
+        if (!result.converged) {
+          console.warn(`Beam-on-Beam 2D: لم يتقارب التحليل بعد ${result.iterations} تكرارات`);
+        }
+      } else {
+        const results2D = frames.map(f => analyzeFrame(f, bMap, columns, mat, removedColumnIds, undefined, beamHinges2D));
+        dispatch({ type: 'SET_FRAME_RESULTS', results: results2D });
+        dispatch({ type: 'SET_BOB_CONNECTIONS', connections: [] });
+      }
+      dispatch({ type: 'SET_ANALYZED', value: true });
+      return;
+    }
+
     // ── Legacy 3D engine path ────────────────────────────────────────────────
     const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
     if (removedColumnIds.length > 0 && detectedConnections.length > 0) {
@@ -1674,13 +1708,18 @@ const Index = () => {
                       setFemError(null);
                     }}
                   >
+                    <option value="legacy_2d">2D — طريقة صلابة المصفوفة (كلاسيكي)</option>
                     <option value="legacy_3d">3D (Legacy) — إطارات ثلاثية الأبعاد</option>
                     <option value="fem_coupled">FEM (Coupled) — جسور-بلاطات مقترن</option>
                   </select>
                   <Badge
-                    className={`text-[10px] shrink-0 ${selectedEngine === 'fem_coupled'
-                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-400/40'
-                      : 'bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-400/40'}`}
+                    className={`text-[10px] shrink-0 ${
+                      selectedEngine === 'fem_coupled'
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-400/40'
+                        : selectedEngine === 'legacy_2d'
+                          ? 'bg-violet-500/15 text-violet-700 dark:text-violet-400 border-violet-400/40'
+                          : 'bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-400/40'
+                    }`}
                   >
                     {ENGINE_LABELS[selectedEngine]}
                   </Badge>
@@ -1807,6 +1846,121 @@ const Index = () => {
               </CardContent>
             </Card>
 
+            {/* ── بطاقة الجسور الحاملة / المحمولة ─────────────────────────── */}
+            {(detectedConnections.length > 0 || (analyzed && bobConnections.length > 0)) && (
+              <Card className="border-indigo-200 dark:border-indigo-800 bg-indigo-500/5">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <span className="text-indigo-500">⇅</span>
+                    اتصالات الجسور الحاملة / المحمولة
+                    <span className="text-[10px] font-normal text-muted-foreground">
+                      ({detectedConnections.length} اتصال مكتشف)
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {detectedConnections.map((conn, i) => {
+                    const analyzedConn = bobConnections.find(c => c.removedColumnId === conn.removedColumnId);
+                    const primaryBeam = beamsWithLoads.find(b => b.id === conn.primaryBeamId);
+                    const contBeam = conn.continuationBeamId ? beamsWithLoads.find(b => b.id === conn.continuationBeamId) : undefined;
+                    const criterion = (() => {
+                      const hBeams = beamsWithLoads.filter(b =>
+                        (b.fromCol === conn.removedColumnId || b.toCol === conn.removedColumnId) && b.direction === 'horizontal'
+                      );
+                      const vBeams = beamsWithLoads.filter(b =>
+                        (b.fromCol === conn.removedColumnId || b.toCol === conn.removedColumnId) && b.direction === 'vertical'
+                      );
+                      if (conn.primaryDirection === 'horizontal' && hBeams.length >= 2 && vBeams.length === 1) return 'استمرارية (2 أفقي + 1 رأسي)';
+                      if (conn.primaryDirection === 'vertical' && vBeams.length >= 2 && hBeams.length === 1) return 'استمرارية (2 رأسي + 1 أفقي)';
+                      return 'صلابة EI/L';
+                    })();
+                    return (
+                      <div key={i} className="rounded-lg border border-indigo-200/60 dark:border-indigo-800/60 bg-background p-3 space-y-2">
+                        {/* Header row */}
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <span className="text-[10px] text-muted-foreground">
+                            عمود محذوف: <span className="font-mono font-bold text-foreground">{conn.removedColumnId}</span>
+                            <span className="mx-1 opacity-40">·</span>
+                            نقطة ({conn.point.x.toFixed(1)}، {conn.point.y.toFixed(1)}) م
+                            <span className="mx-1 opacity-40">·</span>
+                            معيار التحديد: <span className="font-semibold">{criterion}</span>
+                          </span>
+                          {analyzedConn && analyzedConn.reactionForce > 0 && (
+                            <span className="text-[10px] font-bold bg-amber-500/15 border border-amber-400/40 text-amber-700 dark:text-amber-400 rounded px-2 py-0.5">
+                              حِمل منقول: {analyzedConn.reactionForce.toFixed(1)} kN
+                            </span>
+                          )}
+                        </div>
+                        {/* Primary beam */}
+                        <div className="flex items-start gap-2">
+                          <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-green-500/15 border border-green-400/40 text-green-700 dark:text-green-400 px-1 py-0.5">
+                            حامل ✓
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <span className="font-mono text-xs font-bold text-foreground">{conn.primaryBeamId}</span>
+                            {primaryBeam && (
+                              <span className="text-[10px] text-muted-foreground mr-2">
+                                {conn.primaryDirection === 'horizontal' ? 'أفقي' : 'رأسي'} —
+                                بحر {(primaryBeam.length / 1000).toFixed(2)} م —
+                                {primaryBeam.b}×{primaryBeam.h} مم
+                              </span>
+                            )}
+                            {analyzedConn && analyzedConn.reactionForce > 0 && (
+                              <span className="text-[10px] text-muted-foreground mr-2">
+                                @ {(conn.distanceOnPrimary / 1000).toFixed(2)} م من الطرف الأيسر
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {/* Continuation beam (A2) if any */}
+                        {contBeam && (
+                          <div className="flex items-start gap-2">
+                            <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-green-500/10 border border-green-400/30 text-green-600 dark:text-green-500 px-1 py-0.5">
+                              حامل A2
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <span className="font-mono text-xs font-bold text-foreground">{conn.continuationBeamId}</span>
+                              <span className="text-[10px] text-muted-foreground mr-2">
+                                استمرار للجسر الحامل — بحر {(contBeam.length / 1000).toFixed(2)} م — {contBeam.b}×{contBeam.h} مم
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                        {/* Secondary beams */}
+                        {conn.secondaryBeamIds.map(sid => {
+                          const sb = beamsWithLoads.find(b => b.id === sid);
+                          const isHingedAtI = sb?.fromCol === conn.removedColumnId;
+                          return (
+                            <div key={sid} className="flex items-start gap-2">
+                              <span className="shrink-0 mt-0.5 inline-flex items-center justify-center w-16 text-[10px] font-bold rounded bg-red-500/15 border border-red-400/40 text-red-700 dark:text-red-400 px-1 py-0.5">
+                                محمول ⭕
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <span className="font-mono text-xs font-bold text-foreground">{sid}</span>
+                                {sb && (
+                                  <span className="text-[10px] text-muted-foreground mr-2">
+                                    {sb.direction === 'horizontal' ? 'أفقي' : 'رأسي'} —
+                                    بحر {(sb.length / 1000).toFixed(2)} م —
+                                    {sb.b}×{sb.h} مم —
+                                    مفصلة عند {isHingedAtI ? 'البداية (I)' : 'النهاية (J)'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                  {!analyzed && (
+                    <p className="text-[10px] text-muted-foreground text-center pt-1">
+                      شغّل التحليل لحساب قيم ردود الأفعال المنقولة
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             {!analyzed ? (
               <Card><CardContent className="py-12 text-center">
                 <p className="text-muted-foreground mb-4">يرجى تشغيل التحليل أولاً</p>
@@ -1820,7 +1974,9 @@ const Index = () => {
                     ? 'bg-amber-500/10 border-amber-400/40 text-amber-700 dark:text-amber-400'
                     : selectedEngine === 'fem_coupled'
                       ? 'bg-emerald-500/10 border-emerald-400/40 text-emerald-700 dark:text-emerald-400'
-                      : 'bg-blue-500/10 border-blue-400/40 text-blue-700 dark:text-blue-400'
+                      : selectedEngine === 'legacy_2d'
+                        ? 'bg-violet-500/10 border-violet-400/40 text-violet-700 dark:text-violet-400'
+                        : 'bg-blue-500/10 border-blue-400/40 text-blue-700 dark:text-blue-400'
                 }`}>
                   <Zap size={12} className="shrink-0" />
                   <span className="font-semibold">
@@ -1828,7 +1984,9 @@ const Index = () => {
                       ? 'تحليل إطار نقي — جساءة البلاطات مُهملة'
                       : selectedEngine === 'fem_coupled'
                         ? 'تحليل FEM مقترن (جسور + بلاطات)'
-                        : 'تحليل 3D — إطارات ثلاثية الأبعاد'}
+                        : selectedEngine === 'legacy_2d'
+                          ? 'تحليل 2D — طريقة صلابة المصفوفة'
+                          : 'تحليل 3D — إطارات ثلاثية الأبعاد'}
                   </span>
                   <span className="opacity-70 mr-auto text-[10px]">
                     {ignoreSlab

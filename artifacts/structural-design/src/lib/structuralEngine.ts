@@ -856,8 +856,8 @@ export function analyzeFrame(
   columns: Column[], mat: MatProps,
   removedColumnIds: string[] = [],
   additionalPointLoads?: Map<string, MSPointLoad[]>,
-  /** Set of secondary (carried) beam IDs that should have a hinge at their removed-column end */
-  secondaryBeamHinges?: Map<string, 'I' | 'J'>
+  /** Set of beam IDs that should have moment releases: 'I' = start end, 'J' = end end, 'BOTH' = both ends */
+  secondaryBeamHinges?: Map<string, 'I' | 'J' | 'BOTH'>
 ): FrameResult {
   const frameBeams = frame.beamIds.map(id => beamsMap.get(id)!);
   const n = frameBeams.length;
@@ -893,7 +893,7 @@ export function analyzeFrame(
   const elements: MSElement[] = frameBeams.map((b, i) => {
     const I = (b.b / 1000) * (b.h / 1000) ** 3 / 12;
     const pointLoads = additionalPointLoads?.get(b.id) || [];
-    // Check if this beam has a hinge at either end (for carried beams)
+    // Check if this beam has a hinge at either end (for carried beams or user-defined releases)
     const hingeEnd = secondaryBeamHinges?.get(b.id);
     return {
       id: b.id,
@@ -904,8 +904,8 @@ export function analyzeFrame(
       EI: E * (0.35 * I),
       w: 0,
       pointLoads: pointLoads.length > 0 ? pointLoads : undefined,
-      hingeI: hingeEnd === 'I',
-      hingeJ: hingeEnd === 'J',
+      hingeI: hingeEnd === 'I' || hingeEnd === 'BOTH',
+      hingeJ: hingeEnd === 'J' || hingeEnd === 'BOTH',
     };
   });
 
@@ -982,13 +982,15 @@ export function analyzeWithBeamOnBeam(
   columns: Column[], mat: MatProps,
   removedColumnIds: string[], connections: BeamOnBeamConnection[],
   maxIterations: number = 10,
-  convergenceTol: number = 0.01
+  convergenceTol: number = 0.01,
+  /** Extra user-defined hinges (e.g. from end-release editor) to merge with auto-detected secondary beam hinges */
+  extraBeamHinges?: Map<string, 'I' | 'J' | 'BOTH'>
 ): { frameResults: FrameResult[]; connections: BeamOnBeamConnection[]; iterations: number; converged: boolean } {
   
   // Build hinge map for secondary (carried) beams:
   // Each secondary beam gets a moment release (hinge) at the end connecting to the removed column.
   // This is how ETABS/Gerber beams work: the carried beam transfers only shear (forces), not moments.
-  const secondaryBeamHinges = new Map<string, 'I' | 'J'>();
+  const secondaryBeamHinges = new Map<string, 'I' | 'J' | 'BOTH'>();
   for (const conn of connections) {
     for (const secBeamId of conn.secondaryBeamIds) {
       const beam = beamsMap.get(secBeamId);
@@ -998,6 +1000,16 @@ export function analyzeWithBeamOnBeam(
         secondaryBeamHinges.set(secBeamId, 'I'); // Hinge at start (nodeI)
       } else if (beam.toCol === conn.removedColumnId) {
         secondaryBeamHinges.set(secBeamId, 'J'); // Hinge at end (nodeJ)
+      }
+    }
+  }
+
+  // Merge user-defined end releases into the hinge map.
+  // Secondary beam hinges (auto-detected) take precedence; user hinges fill the gaps.
+  if (extraBeamHinges) {
+    for (const [beamId, end] of extraBeamHinges) {
+      if (!secondaryBeamHinges.has(beamId)) {
+        secondaryBeamHinges.set(beamId, end);
       }
     }
   }

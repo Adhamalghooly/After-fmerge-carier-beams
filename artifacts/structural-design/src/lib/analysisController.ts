@@ -24,9 +24,10 @@ import type { MergedResult }               from '@/slabFEMEngine/mergedDOFSystem
 // Engine type identifier
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type EngineType = 'legacy_3d' | 'fem_coupled';
+export type EngineType = 'legacy_2d' | 'legacy_3d' | 'fem_coupled';
 
 export const ENGINE_LABELS: Record<EngineType, string> = {
+  legacy_2d:   '2D (Matrix Stiffness)',
   legacy_3d:   '3D (Legacy)',
   fem_coupled: 'FEM (Coupled)',
 };
