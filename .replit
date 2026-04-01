@@ -18,6 +18,28 @@ modules = ["nodejs-24"]
   env = { "CI" = "true" }
 
   [workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=20592 BASE_PATH=/ pnpm --filter @workspace/structural-design run dev"
+waitForPort = 20592
 
   [agent]
   stack = "PNPM_WORKSPACE"
