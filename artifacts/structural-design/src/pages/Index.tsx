@@ -62,6 +62,7 @@ import LevelPlanView from "@/components/LevelPlanView";
 import LoadComparisonPanel from "@/components/LoadComparisonPanel";
 import FEMComparisonPanel  from "@/components/FEMComparisonPanel";
 import GlobalFrameSolverPanel from "@/components/GlobalFrameSolverPanel";
+import ETABSImportPanel from "@/components/ETABSImportPanel";
 
 const ParamInput = ({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) => (
   <div className="space-y-1">
@@ -676,6 +677,16 @@ const Index = () => {
     const bMap = new Map(beamsWithLoads.map(b => [b.id, b]));
     return frames.map(f => analyzeFrame(f, bMap, columns, mat));
   }, [analyzed, frames, beamsWithLoads, columns, mat]);
+
+  // 3D frame results — always computed for ETABS comparison (independent of selected engine)
+  const frameResults3DRaw = useMemo(() => {
+    if (!analyzed || frames.length === 0) return [] as FrameResult[];
+    try {
+      return getFrameResults3D(frames, beamsWithLoads, columns, mat, frameEndReleases, detectedConnections);
+    } catch {
+      return [] as FrameResult[];
+    }
+  }, [analyzed, frames, beamsWithLoads, columns, mat, frameEndReleases, detectedConnections]);
 
   // 2D column loads (kept for comparison/fallback)
   const colLoadsBiaxial = useMemo(() => {
@@ -1703,6 +1714,7 @@ const Index = () => {
                 <TabsTrigger value="analysis-main" className="text-[11px] gap-1 min-h-[36px]"><Calculator size={12} />التحليل الرئيسي</TabsTrigger>
                 <TabsTrigger value="analysis-compare" className="text-[11px] gap-1 min-h-[36px] text-blue-600 dark:text-blue-400"><BarChart3 size={12} />مقارنة توزيع الأحمال</TabsTrigger>
                 <TabsTrigger value="analysis-fem-compare" className="text-[11px] gap-1 min-h-[36px] text-emerald-600 dark:text-emerald-400"><BarChart3 size={12} />Comparison</TabsTrigger>
+                <TabsTrigger value="analysis-etabs-import" className="text-[11px] gap-1 min-h-[36px] text-orange-600 dark:text-orange-400"><BarChart3 size={12} />مقارنة ETABS</TabsTrigger>
               </TabsList>
               <TabsContent value="analysis-main" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
             {/* ── Analysis Engine Selector ──────────────────────────────── */}
@@ -2361,6 +2373,16 @@ const Index = () => {
                   columns={columns}
                   slabProps={slabProps}
                   mat={mat}
+                  analyzed={analyzed}
+                  onRunAnalysis={runAnalysis}
+                />
+              </TabsContent>
+              <TabsContent value="analysis-etabs-import" className="flex-1 overflow-y-auto p-3 md:p-4 mt-0 pb-20 md:pb-4">
+                <ETABSImportPanel
+                  frameResults2D={frameResults2D}
+                  frameResults3D={frameResults3DRaw}
+                  frameResultsFEM={selectedEngine === 'fem_coupled' ? frameResults : undefined}
+                  beams={beamsWithLoads}
                   analyzed={analyzed}
                   onRunAnalysis={runAnalysis}
                 />
